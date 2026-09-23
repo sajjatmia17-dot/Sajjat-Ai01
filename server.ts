@@ -2078,26 +2078,36 @@ REAL-TIME TWO-WAY LIVE VOICE CONVERSATION DIRECTIVES:
   }
 });
 
+server.on("error", (err: any) => {
+  console.error("HTTP Server error:", err);
+});
+
 // Vite middleware or production static serving
 async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
-    const { createServer: createViteServer } = await import("vite");
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
+  try {
+    if (process.env.NODE_ENV !== "production") {
+      const { createServer: createViteServer } = await import("vite");
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), "dist");
+      app.use(express.static(distPath));
+      app.get("*", (req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    }
 
-  server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Sajjat AI Server running on http://0.0.0.0:${PORT}`);
-  });
+    server.listen(PORT, "0.0.0.0", () => {
+      console.log(`Sajjat AI Server running on http://0.0.0.0:${PORT}`);
+    });
+  } catch (err) {
+    console.error("Error starting Sajjat AI Server:", err);
+  }
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error("Failed to start server:", err);
+});

@@ -19,6 +19,7 @@ import {
   WifiOff
 } from "lucide-react";
 import { UserProfile, SystemSettingsConfig } from "../types";
+import { sendChatMessage } from "../api";
 
 interface LiveVoiceModalProps {
   isOpen: boolean;
@@ -154,6 +155,8 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
 
   // Audio References
   const wsRef = useRef<WebSocket | null>(null);
+  const speechRecRef = useRef<any>(null);
+  const isBrowserNativeRef = useRef<boolean>(false);
   const micStreamRef = useRef<MediaStream | null>(null);
   const inputAudioCtxRef = useRef<AudioContext | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
@@ -338,7 +341,24 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       wsRef.current = null;
     }
 
-    // 8. Clear timer
+    // 8. Stop speech recognition & synthesis if running natively
+    if (speechRecRef.current) {
+      try {
+        speechRecRef.current.onend = null;
+        speechRecRef.current.onerror = null;
+        speechRecRef.current.onresult = null;
+        speechRecRef.current.stop();
+      } catch {}
+      speechRecRef.current = null;
+    }
+    if ("speechSynthesis" in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {}
+    }
+    isBrowserNativeRef.current = false;
+
+    // 9. Clear timer
     if (callTimerRef.current) {
       clearInterval(callTimerRef.current);
       callTimerRef.current = null;
@@ -347,6 +367,148 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
     setMicVolume(0);
     setAiVolume(0);
   }, [stopAllAudioPlayback]);
+
+  // Fallback: Browser Native Live Voice Mode (for Netlify, Vercel, or static hosts where WS server is missing)
+  const startBrowserNativeVoice = useCallback(() => {
+    cleanupAllAudio();
+    isBrowserNativeRef.current = true;
+    setErrorMessage("");
+    setCallStatus("connecting");
+    setCallDuration(0);
+    setLiveTranscript("");
+    currentAiSpeechAccumulator.current = "";
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setErrorMessage("আপনার ব্রাউজারে ভয়েস রিকগনিশন সাপোর্ট করে না। অনুগ্রহ করে Google Chrome, Microsoft Edge অথবা Mobile Chrome ব্রাউজার ব্যবহার করুন।");
+      setCallStatus("error");
+      return;
+    }
+
+    try {
+      const rec = new SpeechRecognition();
+      speechRecRef.current = rec;
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = language === "en-US" ? "en-US" : "bn-BD";
+
+      rec.onstart = () => {
+        setCallStatus("listening");
+        playTone("connect");
+        if (callTimerRef.current) clearInterval(callTimerRef.current);
+        callTimerRef.current = setInterval(() => {
+          setCallDuration((prev) => prev + 1);
+        }, 1000);
+      };
+
+      rec.onresult = async (event: any) => {
+        let interim = "";
+        let finalSpeech = "";
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalSpeech += transcript;
+          } else {
+            interim += transcript;
+          }
+        }
+
+        if (interim) {
+          setLiveTranscript(interim);
+          setMicVolume(0.8);
+        }
+
+        if (finalSpeech.trim()) {
+          const userText = finalSpeech.trim();
+          setLiveTranscript(`"${userText}"`);
+          setMicVolume(0);
+
+          const nowTime = new Date().toLocaleTimeString("bn-BD", { hour: "2-digit", minute: "2-digit" });
+          setTranscriptHistory((prev) => [
+            ...prev,
+            { id: `user_${Date.now()}`, role: "user", text: userText, time: nowTime }
+          ]);
+
+          try { rec.stop(); } catch {}
+
+          setCallStatus("speaking");
+          setLiveTranscript("Sajjat AI উত্তর তৈরি করছে...");
+
+          try {
+            const aiResponse = await sendChatMessage({ message: userText });
+            const replyText = aiResponse.reply || "আমি আপনার বার্তা পেয়েছি।";
+
+            setLiveTranscript(replyText);
+            setTranscriptHistory((prev) => [
+              ...prev,
+              { id: `ai_${Date.now()}`, role: "assistant", text: replyText, time: nowTime }
+            ]);
+            if (onAddExchangeToChat) {
+              onAddExchangeToChat(userText, replyText);
+            }
+
+            if ("speechSynthesis" in window) {
+              window.speechSynthesis.cancel();
+              const cleanSpeech = replyText.replace(/[*_#`]|```[\s\S]*?```/g, " ").trim();
+              const utterance = new SpeechSynthesisUtterance(cleanSpeech);
+              utterance.lang = language === "en-US" ? "en-US" : "bn-BD";
+              utterance.rate = parseFloat(systemSettings?.liveVoiceSpeed || "1.0");
+
+              const voices = window.speechSynthesis.getVoices();
+              const matchingVoice = voices.find(v => v.lang.includes(language === "en-US" ? "en" : "bn"));
+              if (matchingVoice) utterance.voice = matchingVoice;
+
+              utterance.onstart = () => {
+                setCallStatus("speaking");
+                setAiVolume(0.8);
+              };
+
+              utterance.onend = () => {
+                setAiVolume(0);
+                setCallStatus("listening");
+                try { rec.start(); } catch {}
+              };
+
+              utterance.onerror = () => {
+                setAiVolume(0);
+                setCallStatus("listening");
+                try { rec.start(); } catch {}
+              };
+
+              window.speechSynthesis.speak(utterance);
+            } else {
+              setCallStatus("listening");
+              try { rec.start(); } catch {}
+            }
+          } catch {
+            setCallStatus("listening");
+            try { rec.start(); } catch {}
+          }
+        }
+      };
+
+      rec.onerror = (e: any) => {
+        console.warn("SpeechRecognition error:", e);
+        if (e.error !== "no-speech" && e.error !== "aborted") {
+          setErrorMessage("কথা শুনতে পাওয়া যায়নি। অনুগ্রহ করে আবার বলুন।");
+        }
+      };
+
+      rec.onend = () => {
+        if (isBrowserNativeRef.current && callStatus !== "closed" && callStatus !== "error" && !window.speechSynthesis?.speaking) {
+          try { rec.start(); } catch {}
+        }
+      };
+
+      rec.start();
+    } catch (err: any) {
+      console.error("Browser native voice error:", err);
+      setErrorMessage("লাইভ ভয়েস চালু করতে সমস্যা হয়েছে: " + err.message);
+      setCallStatus("error");
+    }
+  }, [cleanupAllAudio, language, playTone, onAddExchangeToChat, systemSettings, callStatus]);
 
   // Start the live bidirectional session
   const startLiveSession = useCallback(async () => {
@@ -547,21 +709,20 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       };
 
       ws.onerror = (err) => {
-        console.error("Live WebSocket error:", err);
-        setErrorMessage("সার্ভারের সাথে লাইভ ভয়েস সংযোগ বিচ্ছিন্ন হয়েছে।");
-        setCallStatus("error");
+        console.warn("Server WebSocket unavailable (e.g. Netlify/Static host). Activating Browser Native Live Voice Mode...", err);
+        try { ws.close(); } catch {}
+        startBrowserNativeVoice();
       };
 
       ws.onclose = () => {
         console.log("Live WebSocket closed");
-        if (callStatus !== "error") {
+        if (callStatus !== "error" && !isBrowserNativeRef.current) {
           setCallStatus("closed");
         }
       };
     } catch (wsErr: any) {
-      console.error("WebSocket creation error:", wsErr);
-      setErrorMessage("লাইভ সকেট শুরু করা যায়নি: " + wsErr.message);
-      setCallStatus("error");
+      console.warn("WebSocket creation failed, using Browser Native Live Voice Mode:", wsErr);
+      startBrowserNativeVoice();
     }
   }, [
     cleanupAllAudio,
@@ -573,6 +734,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
     playAudioChunk,
     stopAllAudioPlayback,
     callStatus,
+    startBrowserNativeVoice,
   ]);
 
   // Toggle Mute / Unmute
@@ -599,29 +761,68 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
   const handleManualInterrupt = () => {
     playTone("interrupt");
     stopAllAudioPlayback();
+    if ("speechSynthesis" in window) {
+      try { window.speechSynthesis.cancel(); } catch {}
+    }
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      // Send a small audio chunk or text trigger to signal interruption
       wsRef.current.send(JSON.stringify({ type: "text", text: " " }));
+    } else if (isBrowserNativeRef.current && speechRecRef.current) {
+      try { speechRecRef.current.start(); } catch {}
+      setCallStatus("listening");
     }
   };
 
   // Send quick text into the live session
-  const handleSendQuickText = (e?: React.FormEvent) => {
+  const handleSendQuickText = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const text = quickTextInput.trim();
     if (!text) return;
 
+    setQuickTextInput("");
+    const nowTime = new Date().toLocaleTimeString("bn-BD", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+    setTranscriptHistory((prev) => [
+      ...prev,
+      { id: `u_${Date.now()}`, role: "user", text, time: nowTime },
+    ]);
+
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      const nowTime = new Date().toLocaleTimeString("bn-BD", {
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-      setTranscriptHistory((prev) => [
-        ...prev,
-        { id: `u_${Date.now()}`, role: "user", text, time: nowTime },
-      ]);
       wsRef.current.send(JSON.stringify({ type: "text", text }));
-      setQuickTextInput("");
+    } else {
+      // Natively process quick text
+      setCallStatus("speaking");
+      setLiveTranscript("Sajjat AI উত্তর তৈরি করছে...");
+      try {
+        const aiResponse = await sendChatMessage({ message: text });
+        const replyText = aiResponse.reply || "আমি আপনার কথা পেয়েছি।";
+
+        setLiveTranscript(replyText);
+        setTranscriptHistory((prev) => [
+          ...prev,
+          { id: `ai_${Date.now()}`, role: "assistant", text: replyText, time: nowTime },
+        ]);
+        if (onAddExchangeToChat) {
+          onAddExchangeToChat(text, replyText);
+        }
+
+        if ("speechSynthesis" in window) {
+          window.speechSynthesis.cancel();
+          const cleanSpeech = replyText.replace(/[*_#`]|```[\s\S]*?```/g, " ").trim();
+          const utterance = new SpeechSynthesisUtterance(cleanSpeech);
+          utterance.lang = language === "en-US" ? "en-US" : "bn-BD";
+          utterance.rate = parseFloat(systemSettings?.liveVoiceSpeed || "1.0");
+          utterance.onend = () => setCallStatus("listening");
+          utterance.onerror = () => setCallStatus("listening");
+          window.speechSynthesis.speak(utterance);
+        } else {
+          setCallStatus("listening");
+        }
+      } catch {
+        setCallStatus("listening");
+      }
     }
   };
 

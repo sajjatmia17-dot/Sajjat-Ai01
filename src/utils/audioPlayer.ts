@@ -79,7 +79,7 @@ export function isAiVoicePlaying(): boolean {
   return isPlayingVoice;
 }
 
-// Play AI voice with Server TTS as primary, Web Speech API as fallback
+// Play AI voice with Server TTS as primary, Direct TTS as secondary, Web Speech API as final fallback
 export function playAiVoice(
   rawText: string,
   callbacks?: {
@@ -101,16 +101,22 @@ export function playAiVoice(
   // 1. Primary Method: Fetch high quality audio from /api/tts
   const attemptServerTts = async () => {
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+
       const response = await fetch("/api/tts", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ text: cleanText }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
 
-      if (!response.ok) {
-        throw new Error(`TTS server responded with ${response.status}`);
+      const contentType = response.headers.get("content-type") || "";
+      if (!response.ok || !contentType.includes("audio")) {
+        throw new Error(`TTS server responded with status ${response.status}`);
       }
 
       const audioBlob = await response.blob();
@@ -132,17 +138,17 @@ export function playAiVoice(
       };
 
       audio.onerror = (e) => {
-        console.warn("Server Audio playback error, switching to Web Speech fallback:", e);
+        console.warn("Server Audio playback error, switching to direct audio fallback:", e);
         if (isPlayingVoice) {
-          playBrowserSpeech(cleanText, callbacks);
+          playDirectTts(cleanText, callbacks);
         }
       };
 
       await audio.play();
     } catch (err) {
-      console.warn("Server TTS unavailable, using Web Speech synthesis fallback:", err);
+      console.warn("Server TTS unavailable (e.g. Netlify/Static), using Direct TTS audio fallback:", err);
       if (isPlayingVoice) {
-        playBrowserSpeech(cleanText, callbacks);
+        playDirectTts(cleanText, callbacks);
       }
     }
   };
@@ -150,6 +156,89 @@ export function playAiVoice(
   attemptServerTts();
 
   return stopAiVoice;
+}
+
+// Direct High-Quality TTS Audio Fallback (Works on Netlify & Mobile without server)
+async function playDirectTts(
+  cleanText: string,
+  callbacks?: {
+    onStart?: () => void;
+    onEnd?: () => void;
+    onError?: (err: any) => void;
+  }
+) {
+  if (!isPlayingVoice) return;
+
+  const hasBangla = /[\u0980-\u09FF]/.test(cleanText);
+  const lang = hasBangla ? "bn" : "en";
+
+  // Split text into chunks under 180 chars for TTS URL safety
+  const chunks: string[] = [];
+  const rawSentences = cleanText.split(/(?<=[।?!.\n])/g);
+  let currentChunk = "";
+
+  for (const sentence of rawSentences) {
+    const trimmed = sentence.trim();
+    if (!trimmed) continue;
+    if ((currentChunk + " " + trimmed).length > 170) {
+      if (currentChunk) chunks.push(currentChunk);
+      currentChunk = trimmed;
+    } else {
+      currentChunk = currentChunk ? currentChunk + " " + trimmed : trimmed;
+    }
+  }
+  if (currentChunk) chunks.push(currentChunk);
+
+  if (chunks.length === 0) {
+    stopAiVoice();
+    callbacks?.onEnd?.();
+    return;
+  }
+
+  let index = 0;
+  let started = false;
+
+  const playNextChunk = async () => {
+    if (!isPlayingVoice || index >= chunks.length) {
+      stopAiVoice();
+      callbacks?.onEnd?.();
+      return;
+    }
+
+    const textToSpeak = chunks[index];
+    index++;
+
+    const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(
+      textToSpeak
+    )}&tl=${lang}&client=tw-ob`;
+
+    try {
+      const audio = new Audio(ttsUrl);
+      activeAudioElement = audio;
+
+      audio.onplay = () => {
+        if (!started) {
+          started = true;
+          callbacks?.onStart?.();
+        }
+      };
+
+      audio.onended = () => {
+        playNextChunk();
+      };
+
+      audio.onerror = () => {
+        console.warn("Direct Audio chunk error, switching to Web Speech API:");
+        playBrowserSpeech(chunks.slice(index - 1).join(" "), callbacks);
+      };
+
+      await audio.play();
+    } catch {
+      playBrowserSpeech(chunks.slice(index - 1).join(" "), callbacks);
+    }
+  };
+
+  playNextChunk();
 }
 
 // Browser Web Speech API fallback
@@ -174,7 +263,6 @@ function playBrowserSpeech(
     const hasBangla = /[\u0980-\u09FF]/.test(cleanText);
     const targetLang = hasBangla ? "bn-BD" : "en-US";
 
-    // Split into sentences so browser never cuts off
     const sentences = cleanText.split(/(?<=[।?!.\n])/g).filter((s) => s.trim().length > 0);
     if (sentences.length === 0) {
       stopAiVoice();
@@ -182,40 +270,48 @@ function playBrowserSpeech(
       return;
     }
 
-    const voices = window.speechSynthesis.getVoices();
-    let selectedVoice: SpeechSynthesisVoice | null = null;
+    const getMatchingVoice = () => {
+      const voices = window.speechSynthesis.getVoices();
+      if (hasBangla) {
+        return (
+          voices.find(
+            (v) =>
+              v.lang === "bn-BD" ||
+              v.lang === "bn-IN" ||
+              v.lang.startsWith("bn") ||
+              v.name.toLowerCase().includes("bangla") ||
+              v.name.toLowerCase().includes("bengali")
+          ) || null
+        );
+      } else {
+        return (
+          voices.find(
+            (v) =>
+              v.lang === "en-US" ||
+              v.lang === "en-GB" ||
+              v.lang.startsWith("en")
+          ) || null
+        );
+      }
+    };
 
-    if (hasBangla) {
-      selectedVoice =
-        voices.find(
-          (v) =>
-            v.lang === "bn-BD" ||
-            v.lang === "bn-IN" ||
-            v.lang.startsWith("bn") ||
-            v.name.toLowerCase().includes("bangla") ||
-            v.name.toLowerCase().includes("bengali")
-        ) || null;
-    } else {
-      selectedVoice =
-        voices.find(
-          (v) =>
-            v.lang === "en-US" ||
-            v.lang === "en-GB" ||
-            v.lang.startsWith("en")
-        ) || null;
+    let selectedVoice = getMatchingVoice();
+    if (!selectedVoice && window.speechSynthesis.onvoiceschanged !== undefined) {
+      window.speechSynthesis.onvoiceschanged = () => {
+        selectedVoice = getMatchingVoice();
+      };
     }
 
     let currentIndex = 0;
     callbacks?.onStart?.();
 
-    // Chrome keep-alive
     if (keepAliveInterval) clearInterval(keepAliveInterval);
     keepAliveInterval = setInterval(() => {
       if (window.speechSynthesis.speaking) {
         window.speechSynthesis.pause();
         window.speechSynthesis.resume();
       }
-    }, 4000);
+    }, 3000);
 
     const speakNextSentence = () => {
       if (!isPlayingVoice || currentIndex >= sentences.length) {

@@ -62,6 +62,15 @@ export const auth = getAuth(app);
 export const database = getDatabase(app);
 export const storage = getStorage(app);
 
+export function sanitizeForFirebase<T>(data: T): T {
+  if (data === undefined || data === null) return null as any;
+  try {
+    return JSON.parse(JSON.stringify(data));
+  } catch {
+    return data;
+  }
+}
+
 export function getOrCreateGuestId(): string {
   try {
     let guestId = localStorage.getItem("sajjat_ai_guest_uid");
@@ -652,10 +661,11 @@ export async function saveAdminAISettings(settings: any): Promise<void> {
 export async function saveUserChatSession(uid: string, session: ChatSession): Promise<void> {
   try {
     const sessionRef = ref(database, `users/${uid}/chats/${session.id}`);
-    await set(sessionRef, {
+    const cleanSession = sanitizeForFirebase({
       ...session,
       updatedAt: Date.now()
     });
+    await set(sessionRef, cleanSession);
   } catch (error) {
     console.error("Error saving chat session to Firebase:", error);
     // Fallback to localStorage if offline/network issue
