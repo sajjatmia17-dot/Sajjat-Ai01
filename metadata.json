@@ -1,0 +1,10 @@
+{
+  "name": " Remix Sajjat AI",
+  "description": "Sajjat AI - Smart AI Assistant created by Sajjat Mia powered by Gemini AI with Firebase Authentication and Realtime Database.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
