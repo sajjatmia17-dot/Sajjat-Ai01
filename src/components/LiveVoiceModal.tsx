@@ -299,6 +299,8 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
   const isComponentMounted = useRef<boolean>(true);
   const currentAiSpeechAccumulator = useRef<string>("");
   const isProcessingSpeechRef = useRef<boolean>(false);
+  const speechAccumulatorRef = useRef<string>("");
+  const speechTimeoutRef = useRef<any>(null);
 
   // Format call timer mm:ss
   const formatTime = (seconds: number) => {
@@ -602,71 +604,82 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
           }
         }
 
-        if (interim) {
-          setLiveTranscript(interim);
-          setMicVolume(0.8);
-        }
+        const currentCombined = (finalSpeech + interim).trim();
+        if (currentCombined) {
+          speechAccumulatorRef.current = currentCombined;
+          setLiveTranscript(currentCombined);
+          setMicVolume(0.85); // Animate mic visualizer on voice input!
 
-        if (finalSpeech.trim()) {
-          isProcessingSpeechRef.current = true;
-          const userText = finalSpeech.trim();
-          setLiveTranscript(`"${userText}"`);
-          setMicVolume(0);
+          // Reset silence detection timeout!
+          if (speechTimeoutRef.current) {
+            clearTimeout(speechTimeoutRef.current);
+          }
 
-          const nowTime = new Date().toLocaleTimeString("bn-BD", { hour: "2-digit", minute: "2-digit" });
-          setTranscriptHistory((prev) => [
-            ...prev,
-            { id: `user_${Date.now()}`, role: "user", text: userText, time: nowTime }
-          ]);
+          speechTimeoutRef.current = setTimeout(async () => {
+            const userText = speechAccumulatorRef.current.trim();
+            if (!userText || isProcessingSpeechRef.current) return;
 
-          try { rec.stop(); } catch {}
+            isProcessingSpeechRef.current = true;
+            setLiveTranscript(`"${userText}"`);
+            setMicVolume(0);
 
-          setCallStatus("speaking");
-          setLiveTranscript("Sajjat AI উত্তর তৈরি করছে...");
-
-          try {
-            const aiResponse = await sendChatMessage({ message: userText });
-            const replyText = aiResponse.reply || "আমি আপনার বার্তা পেয়েছি।";
-
-            setLiveTranscript(replyText);
+            const nowTime = new Date().toLocaleTimeString("bn-BD", { hour: "2-digit", minute: "2-digit" });
             setTranscriptHistory((prev) => [
               ...prev,
-              { id: `ai_${Date.now()}`, role: "assistant", text: replyText, time: nowTime }
+              { id: `user_${Date.now()}`, role: "user", text: userText, time: nowTime }
             ]);
-            if (onAddExchangeToChat) {
-              onAddExchangeToChat(userText, replyText);
-            }
 
-            // High-fidelity chunked Google TTS Audio Player with native fallback
-            if (clientAudioCancelRef.current) {
-              clientAudioCancelRef.current();
-            }
+            try { rec.stop(); } catch {}
 
-            const cleanSpeech = replyText.replace(/[*_#`]|```[\s\S]*?```/g, " ").trim();
-            
-            const cancelTTS = playBengaliSpeechOnClient(
-              cleanSpeech,
-              language,
-              () => {
-                setCallStatus("speaking");
-                setAiVolume(0.85); // Bounce visualizer loudly when AI speaks!
-              },
-              () => {
-                setAiVolume(0);
-                isProcessingSpeechRef.current = false;
-                setCallStatus("listening");
-                try { rec.start(); } catch {}
+            setCallStatus("speaking");
+            setLiveTranscript("Sajjat AI উত্তর তৈরি করছে...");
+
+            try {
+              const aiResponse = await sendChatMessage({ message: userText });
+              const replyText = aiResponse.reply || "আমি আপনার বার্তা পেয়েছি।";
+
+              setLiveTranscript(replyText);
+              setTranscriptHistory((prev) => [
+                ...prev,
+                { id: `ai_${Date.now()}`, role: "assistant", text: replyText, time: nowTime }
+              ]);
+              if (onAddExchangeToChat) {
+                onAddExchangeToChat(userText, replyText);
               }
-            );
 
-            clientAudioCancelRef.current = cancelTTS || null;
+              // High-fidelity chunked Google TTS Audio Player with native fallback
+              if (clientAudioCancelRef.current) {
+                clientAudioCancelRef.current();
+              }
 
-          } catch (chatErr) {
-            console.error("Chat message failed in browser native voice:", chatErr);
-            isProcessingSpeechRef.current = false;
-            setCallStatus("listening");
-            try { rec.start(); } catch {}
-          }
+              const cleanSpeech = replyText.replace(/[*_#`]|```[\s\S]*?```/g, " ").trim();
+              
+              const cancelTTS = playBengaliSpeechOnClient(
+                cleanSpeech,
+                language,
+                () => {
+                  setCallStatus("speaking");
+                  setAiVolume(0.85); // Bounce visualizer loudly when AI speaks!
+                },
+                () => {
+                  setAiVolume(0);
+                  isProcessingSpeechRef.current = false;
+                  setCallStatus("listening");
+                  speechAccumulatorRef.current = "";
+                  try { rec.start(); } catch {}
+                }
+              );
+
+              clientAudioCancelRef.current = cancelTTS || null;
+
+            } catch (chatErr) {
+              console.error("Chat message failed in browser native voice:", chatErr);
+              isProcessingSpeechRef.current = false;
+              setCallStatus("listening");
+              speechAccumulatorRef.current = "";
+              try { rec.start(); } catch {}
+            }
+          }, 1500); // 1.5 seconds silence threshold is perfect for natural conversation pacing!
         }
       };
 

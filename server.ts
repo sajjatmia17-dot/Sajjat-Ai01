@@ -11,7 +11,7 @@ const app = express();
 const server = http.createServer(app);
 // Port 3000 is required by the container reverse proxy architecture.
 // Never read process.env.PORT because Cloud Run sets PORT=8080 which conflicts with Nginx.
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
