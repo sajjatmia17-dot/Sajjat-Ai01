@@ -312,6 +312,7 @@ function playGoogleAudioTts(cleanText: string, callbacks?: VoiceCallbacks) {
 
     const audio = new Audio();
     activeAudioElement = audio;
+    (audio as any).referrerPolicy = "no-referrer";
     audio.src = ttsUrl;
 
     audio.onplay = () => {
@@ -326,9 +327,13 @@ function playGoogleAudioTts(cleanText: string, callbacks?: VoiceCallbacks) {
     };
 
     audio.onerror = (e) => {
-      console.warn("Audio TTS error on chunk:", e);
-      stopAiVoice();
-      callbacks?.onError?.("এই browser-এ Voice সুবিধাটি বর্তমানে available নয়।");
+      console.warn("Audio TTS error on chunk, falling back to Web Speech:", e);
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        playWebSpeech(chunks.slice(index - 1).join(" "), callbacks);
+      } else {
+        stopAiVoice();
+        callbacks?.onError?.("এই browser-এ Voice সুবিধাটি বর্তমানে available নয়।");
+      }
     };
 
     audio.play().catch((playErr) => {

@@ -183,6 +183,7 @@ function playBengaliSpeechOnClient(
       const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${targetLang}&client=tw-ob&q=${encodeURIComponent(chunkText)}`;
       
       audio = new Audio(ttsUrl);
+      (audio as any).referrerPolicy = "no-referrer";
       audio.play().then(() => {
         if (isCancelled) {
           try { audio?.pause(); } catch {}
@@ -287,6 +288,11 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
   const outputAnalyserRef = useRef<AnalyserNode | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const callStatusRef = useRef<LiveCallStatus>(callStatus);
+
+  useEffect(() => {
+    callStatusRef.current = callStatus;
+  }, [callStatus]);
 
   const callTimerRef = useRef<any>(null);
   const animFrameRef = useRef<number | null>(null);
@@ -665,7 +671,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       };
 
       rec.onend = () => {
-        if (isBrowserNativeRef.current && callStatus !== "closed" && callStatus !== "error" && !window.speechSynthesis?.speaking) {
+        if (isBrowserNativeRef.current && callStatusRef.current === "listening") {
           try { rec.start(); } catch {}
         }
       };
@@ -991,18 +997,27 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
           onAddExchangeToChat(text, replyText);
         }
 
-        if ("speechSynthesis" in window) {
-          window.speechSynthesis.cancel();
-          const cleanSpeech = replyText.replace(/[*_#`]|```[\s\S]*?```/g, " ").trim();
-          const utterance = new SpeechSynthesisUtterance(cleanSpeech);
-          utterance.lang = language === "en-US" ? "en-US" : "bn-BD";
-          utterance.rate = parseFloat(systemSettings?.liveVoiceSpeed || "1.0");
-          utterance.onend = () => setCallStatus("listening");
-          utterance.onerror = () => setCallStatus("listening");
-          window.speechSynthesis.speak(utterance);
-        } else {
-          setCallStatus("listening");
+        // High-fidelity chunked Google TTS Audio Player with native fallback
+        if (clientAudioCancelRef.current) {
+          clientAudioCancelRef.current();
         }
+
+        const cleanSpeech = replyText.replace(/[*_#`]|```[\s\S]*?```/g, " ").trim();
+        
+        const cancelTTS = playBengaliSpeechOnClient(
+          cleanSpeech,
+          language,
+          () => {
+            setCallStatus("speaking");
+            setAiVolume(0.85); // Bounce visualizer loudly when AI speaks!
+          },
+          () => {
+            setAiVolume(0);
+            setCallStatus("listening");
+          }
+        );
+
+        clientAudioCancelRef.current = cancelTTS || null;
       } catch {
         setCallStatus("listening");
       }
