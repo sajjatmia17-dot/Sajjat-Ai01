@@ -1214,18 +1214,44 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
               }}
             />
 
-            {/* Central Core Orb */}
-            <div
-              className={`relative z-10 w-24 h-24 rounded-full flex items-center justify-center shadow-2xl transition-all duration-300 ${
+            {/* Central Core Orb Button */}
+            <button
+              onClick={() => {
+                // 1. Resume Audio Contexts
+                try {
+                  const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+                  if (inputAudioCtxRef.current && inputAudioCtxRef.current.state === "suspended") {
+                    inputAudioCtxRef.current.resume();
+                  }
+                  if (outputAudioCtxRef.current && outputAudioCtxRef.current.state === "suspended") {
+                    outputAudioCtxRef.current.resume();
+                  }
+                } catch {}
+
+                // 2. Play silent unlock audio
+                try {
+                  const silentAudio = new Audio();
+                  (silentAudio as any).referrerPolicy = "no-referrer";
+                  silentAudio.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAAA";
+                  silentAudio.play().catch(() => {});
+                } catch {}
+
+                // 3. Reconnect if closed/error
+                if (callStatus === "closed" || callStatus === "error") {
+                  startLiveSession();
+                }
+              }}
+              title={callStatus === "closed" || callStatus === "error" ? "পুনরায় সংযোগ করতে ক্লিক করুন" : "অডিও আনলক করতে ট্যাপ করুন"}
+              className={`relative z-10 w-24 h-24 rounded-full flex items-center justify-center shadow-2xl transition-all duration-300 cursor-pointer focus:outline-none focus:ring-4 focus:ring-indigo-500/50 ${
                 callStatus === "listening"
-                  ? "bg-gradient-to-tr from-emerald-600 to-teal-500 shadow-emerald-500/40 ring-4 ring-emerald-400/30"
+                  ? "bg-gradient-to-tr from-emerald-600 to-teal-500 shadow-emerald-500/40 ring-4 ring-emerald-400/30 hover:scale-105"
                   : callStatus === "speaking"
-                  ? "bg-gradient-to-tr from-cyan-600 via-indigo-600 to-purple-600 shadow-cyan-500/40 ring-4 ring-cyan-400/30"
+                  ? "bg-gradient-to-tr from-cyan-600 via-indigo-600 to-purple-600 shadow-cyan-500/40 ring-4 ring-cyan-400/30 hover:scale-105"
                   : callStatus === "connecting"
                   ? "bg-gradient-to-tr from-amber-600 to-indigo-600 shadow-amber-500/30 animate-pulse"
                   : callStatus === "muted"
                   ? "bg-rose-900/60 ring-2 ring-rose-600/40"
-                  : "bg-slate-800 ring-2 ring-slate-700"
+                  : "bg-slate-800 ring-2 ring-slate-700 hover:bg-slate-750"
               }`}
             >
               {callStatus === "listening" ? (
@@ -1239,7 +1265,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
               ) : (
                 <WifiOff className="w-9 h-9 text-slate-400" />
               )}
-            </div>
+            </button>
           </div>
 
           {/* Status Label */}

@@ -668,8 +668,13 @@ export async function sendChatMessage(params: SendChatParams): Promise<ChatRespo
     }
   }
 
-  const isNetlify = typeof window !== "undefined" && 
-    (window.location.hostname.includes("netlify.app") || window.location.hostname.includes("netlify.com") || window.location.hostname.includes("static"));
+  const isLocalOrStudio = typeof window !== "undefined" && (
+    window.location.hostname.includes("localhost") || 
+    window.location.hostname.includes("127.0.0.1") || 
+    window.location.hostname.includes("asia-southeast1.run.app") || 
+    window.location.hostname.includes("google.com")
+  );
+  const isNetlify = !isLocalOrStudio;
 
   if (isNetlify) {
     try {
