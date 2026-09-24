@@ -180,7 +180,7 @@ function playBengaliSpeechOnClient(
       }
 
       const chunkText = chunks[currentIdx];
-      const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${targetLang}&client=tw-ob&q=${encodeURIComponent(chunkText)}`;
+      const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${targetLang}&client=gtx&q=${encodeURIComponent(chunkText)}`;
       
       audio = new Audio(ttsUrl);
       (audio as any).referrerPolicy = "no-referrer";
@@ -298,6 +298,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
   const animFrameRef = useRef<number | null>(null);
   const isComponentMounted = useRef<boolean>(true);
   const currentAiSpeechAccumulator = useRef<string>("");
+  const isProcessingSpeechRef = useRef<boolean>(false);
 
   // Format call timer mm:ss
   const formatTime = (seconds: number) => {
@@ -488,6 +489,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       } catch {}
     }
     isBrowserNativeRef.current = false;
+    isProcessingSpeechRef.current = false;
 
     // 9. Clear timer
     if (callTimerRef.current) {
@@ -586,6 +588,8 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       };
 
       rec.onresult = async (event: any) => {
+        if (isProcessingSpeechRef.current) return;
+
         let interim = "";
         let finalSpeech = "";
 
@@ -604,6 +608,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
         }
 
         if (finalSpeech.trim()) {
+          isProcessingSpeechRef.current = true;
           const userText = finalSpeech.trim();
           setLiveTranscript(`"${userText}"`);
           setMicVolume(0);
@@ -648,6 +653,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
               },
               () => {
                 setAiVolume(0);
+                isProcessingSpeechRef.current = false;
                 setCallStatus("listening");
                 try { rec.start(); } catch {}
               }
@@ -657,6 +663,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
 
           } catch (chatErr) {
             console.error("Chat message failed in browser native voice:", chatErr);
+            isProcessingSpeechRef.current = false;
             setCallStatus("listening");
             try { rec.start(); } catch {}
           }
@@ -698,13 +705,13 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
     }
 
     // Detect if running on Netlify or another static hosting environment
-    const isNetlify = typeof window !== "undefined" && (
-      window.location.hostname.includes("netlify.app") || 
-      window.location.hostname.includes("netlify.com") || 
-      (window.location.hostname.includes("localhost") === false && 
-       window.location.hostname.includes("asia-southeast1.run.app") === false &&
-       window.location.hostname.includes("google.com") === false)
+    const isLocalOrStudio = typeof window !== "undefined" && (
+      window.location.hostname.includes("localhost") || 
+      window.location.hostname.includes("127.0.0.1") || 
+      window.location.hostname.includes("asia-southeast1.run.app") || 
+      window.location.hostname.includes("google.com")
     );
+    const isNetlify = !isLocalOrStudio;
 
     if (isNetlify) {
       console.log("[LiveVoiceModal] Netlify static host detected. Starting ultra-reliable high-fidelity browser native live voice mode instantly.");

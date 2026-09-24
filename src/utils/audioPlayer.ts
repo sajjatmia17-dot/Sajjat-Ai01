@@ -308,7 +308,7 @@ function playGoogleAudioTts(cleanText: string, callbacks?: VoiceCallbacks) {
 
     const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(
       chunkText
-    )}&tl=${lang}&client=tw-ob`;
+    )}&tl=${lang}&client=gtx`;
 
     const audio = new Audio();
     activeAudioElement = audio;
