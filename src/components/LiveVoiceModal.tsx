@@ -557,7 +557,10 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       updateVolumeLoop();
 
     } catch (permErr: any) {
-      console.warn("Audio context visualization warmup failed or denied:", permErr);
+      console.error("Audio context visualization warmup failed or denied:", permErr);
+      setErrorMessage("মাইক্রোফোন ব্যবহারের অনুমতি দেওয়া হয়নি। অনুগ্রহ করে ব্রাউজার সেটিংস থেকে মাইক্রোফোন অ্যাক্সেস চালু করুন।");
+      setCallStatus("error");
+      return;
     }
 
     try {
@@ -685,6 +688,21 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
         systemSettings.liveVoiceNotice || "লাইভ ভয়েস চ্যাট সাময়িকভাবে অ্যাডমিন কর্তৃক বন্ধ রয়েছে।"
       );
       setCallStatus("error");
+      return;
+    }
+
+    // Detect if running on Netlify or another static hosting environment
+    const isNetlify = typeof window !== "undefined" && (
+      window.location.hostname.includes("netlify.app") || 
+      window.location.hostname.includes("netlify.com") || 
+      (window.location.hostname.includes("localhost") === false && 
+       window.location.hostname.includes("asia-southeast1.run.app") === false &&
+       window.location.hostname.includes("google.com") === false)
+    );
+
+    if (isNetlify) {
+      console.log("[LiveVoiceModal] Netlify static host detected. Starting ultra-reliable high-fidelity browser native live voice mode instantly.");
+      startBrowserNativeVoice();
       return;
     }
 

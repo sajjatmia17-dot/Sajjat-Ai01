@@ -312,7 +312,6 @@ function playGoogleAudioTts(cleanText: string, callbacks?: VoiceCallbacks) {
 
     const audio = new Audio();
     activeAudioElement = audio;
-    audio.crossOrigin = "anonymous";
     audio.src = ttsUrl;
 
     audio.onplay = () => {
