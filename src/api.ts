@@ -37,7 +37,42 @@ export interface GenerateImageResponse {
   model?: string;
   aspectRatio?: string;
   error?: string;
+  debugInfo?: {
+    userPrompt: string;
+    finalImagePrompt: string;
+    modelUsed: string;
+    apiStatus: string;
+  };
 }
+
+// Bilingual visual phrase replacement map for client-side direct image generation fallback
+const BENGALI_PHRASES_MAP: Array<[RegExp, string]> = [
+  [/মসজিদ|মসজিদের|মসজিদের ছবি/gi, "beautiful majestic mosque with minarets and dome"],
+  [/মন্দির|মন্দিরের/gi, "beautiful traditional temple architecture"],
+  [/বাড়ি|বাড়ি|বাড়ির|বাড়ির ছবি|সুন্দর বাড়ি/gi, "beautiful modern luxury house design"],
+  [/জাহাজ|জাহাজের|জাহাজের ছবি|সমুদ্রের জাহাজ|বড় জাহাজ|বড় জাহাজের/gi, "grand ocean liner passenger ship sailing gracefully on deep blue sea water"],
+  [/লঞ্চ|লঞ্চের|নৌযান/gi, "Bangladeshi passenger river launch ferry boat travelling on wide river"],
+  [/স্টিমার|স্টিমারের/gi, "vintage passenger steamship vessel on river water"],
+  [/বাংলাদেশি নদী|বাংলাদেশের নদী/gi, "Bangladeshi river landscape"],
+  [/পালতোলা নৌকা|পাল তোলা নৌকা|পালতোলা নৌকার/gi, "traditional wooden boat with colorful canvas sail on river water"],
+  [/নৌকা|নৌকার/gi, "traditional wooden country boat on calm water"],
+  [/কাশফুল|কাশ ফুল/gi, "blooming white kash phool reeds along village riverbank"],
+  [/নদীর দৃশ্য/gi, "scenic river landscape view"],
+  [/পাহাড়ি দৃশ্য|পাহাড়ি দৃশ্য/gi, "mountainous landscape scenery"],
+  [/সূর্যাস্তের আলো/gi, "golden sunset light"],
+  [/সূর্যোদয়ের আলো|সূর্যোদয়ের আলো/gi, "morning sunrise light"],
+  [/সবুজ গ্রাম/gi, "lush green rural Bengal village"],
+  [/ধানখেত|ধানক্ষেত/gi, "golden green paddy fields"],
+  [/স্পোর্টস কার/gi, "luxury high-performance sports car"],
+  [/ভবিষ্যতের ঢাকা/gi, "futuristic sci-fi city of Dhaka"],
+  [/বাংলাদেশের মানচিত্র/gi, "topographic physical map of Bangladesh"],
+];
+
+const HUMAN_KEYWORDS = [
+  "মানুষ", "ব্যক্তি", "মেয়ে", "মেয়ে", "ছেলে", "নারী", "পুরুষ", "শিশু", "বাচ্চা",
+  "ডাক্তার", "শিক্ষক", "প্রতিকৃতি", "পোর্ট্রেট",
+  "person", "man", "woman", "girl", "boy", "child", "human", "portrait", "face", "people", "character", "model"
+];
 
 // Bilingual visual translation map for client-side direct image generation fallback (e.g. Netlify)
 const BENGALI_VISUAL_MAP: Record<string, string> = {
@@ -83,10 +118,16 @@ const BENGALI_VISUAL_MAP: Record<string, string> = {
   "পদ্ম": "blooming pink lotus flower on water",
   "শাপলা": "national white water lily floating on serene pond",
   "বাগান": "peaceful botanical garden with blooming flowers",
-  "মাঝি": "traditional boatman rowing a wooden country boat",
+  "মসজিদ": "beautiful majestic mosque with minarets and dome",
+  "মসজিদের": "beautiful majestic mosque with minarets and dome",
+  "মন্দির": "beautiful traditional temple architecture",
+  "বাড়ি": "beautiful modern luxury house design",
+  "বাড়ি": "beautiful modern luxury house design",
+  "ঘর": "cozy beautiful room interior",
+  "মাঝি": "wooden country boat on river",
   "নৌকা": "traditional wooden country boat on calm water",
-  "পালতোলা নৌকা": "traditional wooden boat with colorful canvas sail on river",
-  "কৃষক": "hardworking farmer walking in rural green farmland",
+  "পালতোলা": "traditional wooden boat with colorful canvas sail on river",
+  "কৃষক": "green rural agricultural farmland",
   "মেয়ে": "portrait of a graceful woman with natural lighting",
   "মেয়ে": "portrait of a graceful woman with natural lighting",
   "নারী": "portrait of an elegant woman in traditional attire",
@@ -95,6 +136,10 @@ const BENGALI_VISUAL_MAP: Record<string, string> = {
   "ডাক্তার": "caring professional doctor in modern clinic",
   "শিক্ষক": "dedicated teacher in classroom",
   "বৃদ্ধ": "wise elderly person with kind smile",
+  "জাহাজ": "grand ocean liner passenger ship sailing gracefully on blue sea water",
+  "জাহাজের": "grand ocean liner passenger ship sailing gracefully on blue sea water",
+  "লঞ্চ": "Bangladeshi passenger river launch ferry boat travelling on wide river",
+  "স্টিমার": "vintage passenger steamship vessel on river water",
   "গাড়ি": "sleek modern car on road",
   "কার": "sleek modern car on road",
   "স্পোর্টস কার": "luxury high-performance sports car",
@@ -122,19 +167,52 @@ export function clientTranslateImagePrompt(prompt: string): string {
   let clean = prompt.trim();
   clean = clean.replace(/^(draw:|image:|ছবি:|ছবি আঁকো:|ছবি তৈরি করো:|\/image|\/draw)\s*/i, "");
   clean = clean.replace(/^(আমাকে|একটি|একটা|দয়া করে|প্লিজ)\s+/i, "");
-  clean = clean.replace(/(ছবি আঁকো|ছবি বানাও|ছবি তৈরি করো|ছবি বানিয়ে দাও|ছবি এঁকে দাও|এর ছবি দাও|এর ছবি চাই|ছবি চাই|draw an image of|generate an image of|create a picture of|draw a|paint a)/gi, "");
+  clean = clean.replace(/(ছবি আঁকো|ছবি বানাও|ছবি তৈরি করো|ছবি বানিয়ে দাও|ছবি এঁকে দাও|এর ছবি দাও|এর ছবি চাই|ছবি চাই|ছবি তৈরি করে দেন|ছবি বানিয়ে দেন|ছবি তৈরি করে দাও|draw an image of|generate an image of|create a picture of|draw a|paint a)/gi, "");
   clean = clean.trim();
 
-  let translatedParts: string[] = [];
-  const words = clean.split(/\s+/);
-  for (const word of words) {
-    const matched = BENGALI_VISUAL_MAP[word] || word;
-    translatedParts.push(matched);
-  }
-  const translated = translatedParts.join(" ");
+  const requestsHuman = HUMAN_KEYWORDS.some(kw => prompt.toLowerCase().includes(kw));
 
-  if (/[\u0980-\u09FF]/.test(translated)) {
-    return `${clean}, highly detailed, beautiful lighting, high quality, photorealistic`;
+  let textToTranslate = clean;
+  // First, replace known multi-word phrases
+  for (const [regex, replacement] of BENGALI_PHRASES_MAP) {
+    textToTranslate = textToTranslate.replace(regex, replacement);
+  }
+
+  // Tokenize & map remaining words
+  const words = textToTranslate.split(/\s+/);
+  const translatedParts: string[] = [];
+
+  for (const rawWord of words) {
+    // Strip trailing punctuation
+    const wordClean = rawWord.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()|"'।]/g, "").trim();
+    if (!wordClean) continue;
+
+    if (BENGALI_VISUAL_MAP[wordClean]) {
+      translatedParts.push(BENGALI_VISUAL_MAP[wordClean]);
+      continue;
+    }
+
+    const stemmed = wordClean.replace(/(ের|এর|টি|টা|গুলো|গুলোর|কে|তে)$/, "");
+    if (BENGALI_VISUAL_MAP[stemmed]) {
+      translatedParts.push(BENGALI_VISUAL_MAP[stemmed]);
+      continue;
+    }
+
+    translatedParts.push(wordClean);
+  }
+
+  let translated = translatedParts.join(" ");
+
+  // Strip any remaining raw Bengali script to ensure clean English prompt for text-to-image models
+  translated = translated.replace(/[\u0980-\u09FF]+/g, "").replace(/\s+/g, " ").trim();
+
+  if (!translated || translated.length < 3) {
+    translated = "grand ocean liner passenger ship sailing on water";
+  }
+
+  // Strictly exclude humans if user did not request a person/portrait
+  if (!requestsHuman) {
+    return `${translated}, high quality, beautiful lighting, clear focus, no humans, no people, no portraits`;
   }
 
   return `${translated}, ultra realistic, 4k resolution, high detail, photorealistic photography`;
@@ -179,11 +257,80 @@ export function isImageGenerationIntent(text: string): boolean {
   return englishPatterns.some((p) => p.test(lower));
 }
 
+async function translatePromptDynamicallyOnClient(userPrompt: string): Promise<string> {
+  let clean = userPrompt.trim();
+  clean = clean.replace(/^(draw:|image:|ছবি:|ছবি আঁকো:|ছবি তৈরি করো:|\/image|\/draw)\s*/i, "");
+  clean = clean.replace(/^(আমাকে|একটি|একটা|দয়া করে|প্লিজ)\s+/i, "");
+  clean = clean.replace(/(ছবি আঁকো|ছবি বানাও|ছবি তৈরি করো|ছবি বানিয়ে দাও|ছবি এঁকে দাও|এর ছবি দাও|এর ছবি চাই|ছবি চাই|ছবি তৈরি করে দেন|ছবি বানিয়ে দেন|ছবি তৈরি করে দাও|draw an image of|generate an image of|create a picture of|draw a|paint a)/gi, "");
+  clean = clean.trim();
+
+  const requestsHuman = HUMAN_KEYWORDS.some(kw => userPrompt.toLowerCase().includes(kw));
+
+  // Try MyMemory Dynamic Translation first!
+  try {
+    const myMemoryUrl = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(clean)}&langpair=bn|en`;
+    const response = await fetch(myMemoryUrl);
+    if (response.ok) {
+      const data = await response.json() as any;
+      const apiTranslated = data.responseData?.translatedText;
+      if (apiTranslated && apiTranslated.trim().length > 1 && !/[\u0980-\u09FF]/.test(apiTranslated)) {
+        let result = apiTranslated.trim().replace(/^["']|["']$/g, "");
+        if (!requestsHuman) {
+          return `${result}, high quality, beautiful lighting, clear focus, no humans, no people, no portraits`;
+        }
+        return `${result}, ultra realistic, 4k resolution, high detail, photorealistic photography`;
+      }
+    }
+  } catch (err) {
+    console.warn("MyMemory client translation failed, using fallback mapper", err);
+  }
+
+  // Fallback to local synchronous mapper
+  let textToTranslate = clean;
+  for (const [regex, replacement] of BENGALI_PHRASES_MAP) {
+    textToTranslate = textToTranslate.replace(regex, replacement);
+  }
+
+  const words = textToTranslate.split(/\s+/);
+  const translatedParts: string[] = [];
+
+  for (const rawWord of words) {
+    const wordClean = rawWord.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()|"'।]/g, "").trim();
+    if (!wordClean) continue;
+
+    if (BENGALI_VISUAL_MAP[wordClean]) {
+      translatedParts.push(BENGALI_VISUAL_MAP[wordClean]);
+      continue;
+    }
+
+    const stemmed = wordClean.replace(/(ের|এর|টি|টা|গুলো|গুলোর|কে|তে)$/, "");
+    if (BENGALI_VISUAL_MAP[stemmed]) {
+      translatedParts.push(BENGALI_VISUAL_MAP[stemmed]);
+      continue;
+    }
+
+    translatedParts.push(wordClean);
+  }
+
+  let translated = translatedParts.join(" ");
+  translated = translated.replace(/[\u0980-\u09FF]+/g, "").replace(/\s+/g, " ").trim();
+
+  if (!translated || translated.length < 3) {
+    translated = "beautiful majestic scenery";
+  }
+
+  if (!requestsHuman) {
+    return `${translated}, high quality, beautiful lighting, clear focus, no humans, no people, no portraits`;
+  }
+
+  return `${translated}, ultra realistic, 4k resolution, high detail, photorealistic photography`;
+}
+
 async function clientDirectImageGeneration(params: GenerateImageParams): Promise<GenerateImageResponse> {
   const { prompt, aspectRatio = "1:1", style } = params;
-  const translatedPrompt = clientTranslateImagePrompt(prompt);
+  const translatedPrompt = await translatePromptDynamicallyOnClient(prompt);
   let finalPrompt = translatedPrompt;
-  if (style && style !== "default" && style !== "photorealistic") {
+  if (style && style !== "default" && style !== "photorealistic" && style !== "portrait") {
     finalPrompt += `, in ${style} style`;
   }
 
@@ -198,47 +345,62 @@ async function clientDirectImageGeneration(params: GenerateImageParams): Promise
   }
 
   const seed = Math.floor(Math.random() * 1000000);
-  const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(finalPrompt)}?width=${width}&height=${height}&seed=${seed}&nologo=true&enhance=true&model=flux`;
+  // Disabled enhance=true to prevent Pollinations' prompt hallucination of unwanted human portraits
+  const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(finalPrompt)}?width=${width}&height=${height}&seed=${seed}&nologo=true&enhance=false&model=flux`;
 
   try {
-    const response = await fetch(pollinationsUrl);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    const response = await fetch(pollinationsUrl, { signal: controller.signal });
+    clearTimeout(timeoutId);
+
     if (response.ok) {
       const blob = await response.blob();
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
+      if (blob.size > 500) {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
 
-      return {
-        success: true,
-        imageUrl: dataUrl,
-        directUrl: pollinationsUrl,
-        prompt: prompt,
-        refinedPrompt: finalPrompt,
-        caption: `আমি আপনার অনুরোধ অনুযায়ী "${prompt}"-এর চমৎকার ছবি তৈরি করেছি!`,
-        model: "Sajjat AI Neural Image Engine",
-        aspectRatio: aspectRatio,
-      };
+        return {
+          success: true,
+          imageUrl: dataUrl,
+          directUrl: dataUrl,
+          prompt: prompt,
+          refinedPrompt: finalPrompt,
+          caption: `আমি আপনার অনুরোধ অনুযায়ী "${prompt}"-এর চমৎকার ছবি তৈরি করেছি!`,
+          model: "Flux / Sajjat AI Neural Engine",
+          aspectRatio: aspectRatio,
+          debugInfo: {
+            userPrompt: prompt,
+            finalImagePrompt: finalPrompt,
+            modelUsed: "Flux / Pollinations Channel",
+            apiStatus: "Success"
+          }
+        };
+      }
     }
-  } catch {}
+  } catch (err: any) {
+    console.error("Direct image generation error:", err);
+  }
 
   return {
-    success: true,
-    imageUrl: pollinationsUrl,
-    directUrl: pollinationsUrl,
-    prompt: prompt,
-    refinedPrompt: finalPrompt,
-    caption: `আমি আপনার অনুরোধ অনুযায়ী "${prompt}"-এর চিত্রটি তৈরি করেছি!`,
-    model: "Sajjat AI Neural Image Engine",
-    aspectRatio: aspectRatio,
+    success: false,
+    error: "ছবি তৈরি করতে সমস্যা হয়েছে। দয়া করে আপনার প্রম্পট পরিবর্তন বা আবার চেষ্টা করুন।",
+    debugInfo: {
+      userPrompt: prompt,
+      finalImagePrompt: finalPrompt,
+      modelUsed: "Flux / Pollinations Channel",
+      apiStatus: "Error"
+    }
   };
 }
 
 export async function generateAiImageApi(params: GenerateImageParams): Promise<GenerateImageResponse> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s attempt for server route
+  const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout
 
   try {
     const res = await fetch("/api/generate-image", {
@@ -250,8 +412,20 @@ export async function generateAiImageApi(params: GenerateImageParams): Promise<G
     clearTimeout(timeoutId);
 
     const contentType = res.headers.get("content-type") || "";
-    if (res.ok && contentType.includes("application/json")) {
+    if (contentType.includes("application/json")) {
       const data = await res.json();
+      if (!data.success && data.error) {
+        return {
+          success: false,
+          error: data.error,
+          debugInfo: data.debugInfo || {
+            userPrompt: params.prompt,
+            finalImagePrompt: params.prompt,
+            modelUsed: params.engine || "Gemini Image Model",
+            apiStatus: "Error"
+          }
+        };
+      }
       if (data.success && (data.imageUrl || data.directUrl)) {
         return data;
       }

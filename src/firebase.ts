@@ -85,7 +85,7 @@ export function getOrCreateGuestId(): string {
 }
 
 export async function syncUserProfileToDatabase(profileData: UserProfile): Promise<void> {
-  if (!profileData || !profileData.uid) return;
+  if (!profileData || !profileData.uid || profileData.uid.startsWith("guest_")) return;
   const now = new Date().toISOString();
   const payload = {
     uid: profileData.uid,
@@ -659,6 +659,22 @@ export async function saveAdminAISettings(settings: any): Promise<void> {
 
 // Chat Session Database Helpers (Scoped strictly to users/{uid}/chats)
 export async function saveUserChatSession(uid: string, session: ChatSession): Promise<void> {
+  if (!uid) return;
+
+  // Always update local storage first
+  try {
+    const localKey = `sajjat_ai_chats_${uid}`;
+    const existingStr = localStorage.getItem(localKey);
+    const existing: Record<string, ChatSession> = existingStr ? JSON.parse(existingStr) : {};
+    existing[session.id] = session;
+    localStorage.setItem(localKey, JSON.stringify(existing));
+  } catch {}
+
+  // If user is guest or unauthenticated, skip Firebase RTDB write to avoid PERMISSION_DENIED
+  if (uid.startsWith("guest_") || !auth.currentUser) {
+    return;
+  }
+
   try {
     const sessionRef = ref(database, `users/${uid}/chats/${session.id}`);
     const cleanSession = sanitizeForFirebase({
@@ -666,22 +682,32 @@ export async function saveUserChatSession(uid: string, session: ChatSession): Pr
       updatedAt: Date.now()
     });
     await set(sessionRef, cleanSession);
-  } catch (error) {
-    console.error("Error saving chat session to Firebase:", error);
-    // Fallback to localStorage if offline/network issue
-    try {
-      const localKey = `sajjat_ai_chats_${uid}`;
-      const existingStr = localStorage.getItem(localKey);
-      const existing: Record<string, ChatSession> = existingStr ? JSON.parse(existingStr) : {};
-      existing[session.id] = session;
-      localStorage.setItem(localKey, JSON.stringify(existing));
-    } catch {
-      // ignore
+  } catch (error: any) {
+    if (error?.message?.includes("PERMISSION_DENIED") || error?.code === "PERMISSION_DENIED") {
+      console.warn("Firebase RTDB permission restricted, cached session locally.");
+    } else {
+      console.warn("Error saving chat session to Firebase:", error);
     }
   }
 }
 
 export function subscribeToUserChats(uid: string, onUpdate: (sessions: ChatSession[]) => void) {
+  if (!uid || uid.startsWith("guest_") || !auth.currentUser) {
+    try {
+      const localKey = `sajjat_ai_chats_${uid}`;
+      const existingStr = localStorage.getItem(localKey);
+      if (existingStr) {
+        const parsed = JSON.parse(existingStr);
+        const list: ChatSession[] = Object.values(parsed);
+        list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        onUpdate(list);
+        return () => {};
+      }
+    } catch {}
+    onUpdate([]);
+    return () => {};
+  }
+
   const chatsRef = ref(database, `users/${uid}/chats`);
   return onValue(chatsRef, (snapshot) => {
     if (snapshot.exists()) {
@@ -723,7 +749,6 @@ export function subscribeToUserChats(uid: string, onUpdate: (sessions: ChatSessi
     }
   }, (error) => {
     console.warn("RTDB subscribe error:", error);
-    // Try localStorage fallback
     try {
       const localKey = `sajjat_ai_chats_${uid}`;
       const existingStr = localStorage.getItem(localKey);
@@ -741,12 +766,6 @@ export function subscribeToUserChats(uid: string, onUpdate: (sessions: ChatSessi
 
 export async function deleteUserChatSession(uid: string, sessionId: string): Promise<void> {
   try {
-    const sessionRef = ref(database, `users/${uid}/chats/${sessionId}`);
-    await remove(sessionRef);
-  } catch (error) {
-    console.error("Error deleting session:", error);
-  }
-  try {
     const localKey = `sajjat_ai_chats_${uid}`;
     const existingStr = localStorage.getItem(localKey);
     if (existingStr) {
@@ -754,8 +773,15 @@ export async function deleteUserChatSession(uid: string, sessionId: string): Pro
       delete parsed[sessionId];
       localStorage.setItem(localKey, JSON.stringify(parsed));
     }
-  } catch {
-    // ignore
+  } catch {}
+
+  if (uid.startsWith("guest_") || !auth.currentUser) return;
+
+  try {
+    const sessionRef = ref(database, `users/${uid}/chats/${sessionId}`);
+    await remove(sessionRef);
+  } catch (error) {
+    console.warn("Error deleting session from Firebase:", error);
   }
 }
 

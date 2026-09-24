@@ -105,6 +105,12 @@ export const ImageGeneratorModal: React.FC<ImageGeneratorModalProps> = ({
     watermarkedUrl: string;
     prompt: string;
     refinedPrompt?: string;
+    debugInfo?: {
+      userPrompt: string;
+      finalImagePrompt: string;
+      modelUsed: string;
+      apiStatus: string;
+    };
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -182,6 +188,12 @@ export const ImageGeneratorModal: React.FC<ImageGeneratorModalProps> = ({
         watermarkedUrl: finalDisplayUrl,
         prompt: textToUse,
         refinedPrompt: res.refinedPrompt,
+        debugInfo: res.debugInfo || {
+          userPrompt: textToUse,
+          finalImagePrompt: res.refinedPrompt || textToUse,
+          modelUsed: res.model || systemSettings?.imageModelPreset || "gemini-3.1-flash-image",
+          apiStatus: "Success"
+        }
       });
     } catch (err: any) {
       const msg = err?.message || "";
@@ -643,6 +655,32 @@ export const ImageGeneratorModal: React.FC<ImageGeneratorModalProps> = ({
                       </span>
                     </div>
                   </div>
+
+                  {/* PROMPT DEBUG LOG */}
+                  {generatedImage.debugInfo && (
+                    <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 text-xs text-slate-300 space-y-1.5 font-mono">
+                      <div className="flex items-center justify-between text-[11px] text-slate-400 font-sans border-b border-slate-800/80 pb-1.5">
+                        <span className="font-semibold text-cyan-400 flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-cyan-400" /> PROMPT DEBUG LOG
+                        </span>
+                        <span className="text-emerald-400 font-semibold px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20">{generatedImage.debugInfo.apiStatus}</span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px] pt-1">
+                        <div>
+                          <span className="text-slate-400 block font-sans text-[10px] uppercase tracking-wider mb-0.5">USER PROMPT:</span>
+                          <p className="text-slate-200 bg-slate-950 p-2 rounded-lg border border-slate-800 break-words">{generatedImage.debugInfo.userPrompt}</p>
+                        </div>
+                        <div>
+                          <span className="text-slate-400 block font-sans text-[10px] uppercase tracking-wider mb-0.5">FINAL IMAGE PROMPT:</span>
+                          <p className="text-cyan-200 bg-slate-950 p-2 rounded-lg border border-slate-800 break-words">{generatedImage.debugInfo.finalImagePrompt}</p>
+                        </div>
+                      </div>
+                      <div className="text-[11px] text-slate-400 pt-1 flex flex-wrap items-center justify-between font-sans border-t border-slate-800/60 mt-1">
+                        <span>MODEL: <strong className="text-indigo-300 font-mono">{generatedImage.debugInfo.modelUsed}</strong></span>
+                        <span>API STATUS: <strong className="text-emerald-400 font-mono">{generatedImage.debugInfo.apiStatus}</strong></span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </>
