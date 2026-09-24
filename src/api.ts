@@ -1,5 +1,7 @@
 import { ChatMessage, AttachedFile } from "./types";
 import { generateClientFallbackReply } from "./knowledge";
+import { database } from "./firebase";
+import { ref, get } from "firebase/database";
 
 interface SendChatParams {
   message: string;
@@ -438,6 +440,205 @@ export async function generateAiImageApi(params: GenerateImageParams): Promise<G
   return clientDirectImageGeneration(params);
 }
 
+async function sendChatMessageDirectToProvider(params: SendChatParams): Promise<ChatResponse> {
+  const { message, history = [], imageBase64, imageMimeType, attachedFile } = params;
+
+  try {
+    // 1. Get active provider & settings from Firebase RTDB
+    let activeProviderId = "gemini";
+    let activeModelId = "gemini-3.8-flash";
+    let systemInstruction = "";
+
+    try {
+      const settingsSnap = await get(ref(database, "system_settings"));
+      if (settingsSnap.exists()) {
+        const settings = settingsSnap.val();
+        if (settings.activeProvider) activeProviderId = settings.activeProvider;
+        if (settings.activeModel) activeModelId = settings.activeModel;
+        if (settings.systemInstruction) systemInstruction = settings.systemInstruction;
+      }
+    } catch (dbErr) {
+      console.warn("Failed to read system_settings for client fallback:", dbErr);
+    }
+
+    // 2. Get the credentials for this provider
+    let apiKey = "";
+    let providerModelId = activeModelId;
+
+    try {
+      const providerSnap = await get(ref(database, `admin_config/api_providers/${activeProviderId}`));
+      if (providerSnap.exists()) {
+        const providerConfig = providerSnap.val();
+        if (providerConfig.apiKey) apiKey = providerConfig.apiKey;
+        if (providerConfig.modelId) providerModelId = providerConfig.modelId;
+      }
+    } catch (pErr) {
+      console.warn(`Failed to read provider ${activeProviderId} config:`, pErr);
+    }
+
+    // 3. Last-resort fallback for Gemini key
+    if (!apiKey) {
+      activeProviderId = "gemini";
+      const userCustomKey = localStorage.getItem("sajjat_custom_gemini_key");
+      apiKey = userCustomKey || "AIzaSyBuz2yF2QdmwNqBwHGPneEnEZvvGo5WZz0";
+      providerModelId = "gemini-3.8-flash";
+    }
+
+    const cleanModel = providerModelId || "gemini-1.5-flash";
+
+    // 4. Make direct request depending on the provider ID
+    if (activeProviderId === "gemini") {
+      const contents = history.map((msg) => ({
+        role: msg.sender === "user" ? "user" : "model",
+        parts: [{ text: msg.text }],
+      }));
+
+      let promptText = message;
+      if (attachedFile && !attachedFile.isImage && attachedFile.content) {
+        promptText = `[File attached: ${attachedFile.name}]\n\nFile Content:\n${attachedFile.content}\n\nUser Question:\n${message}`;
+      }
+
+      if (imageBase64 || (attachedFile && attachedFile.isImage && attachedFile.base64)) {
+        const imgB64 = imageBase64 || attachedFile?.base64 || "";
+        const imgMime = imageMimeType || attachedFile?.type || "image/jpeg";
+        const cleanB64 = imgB64.includes(",") ? imgB64.split(",")[1] : imgB64;
+
+        contents.push({
+          role: "user",
+          parts: [
+            { inlineData: { mimeType: imgMime, data: cleanB64 } },
+            { text: promptText }
+          ] as any,
+        });
+      } else {
+        contents.push({
+          role: "user",
+          parts: [{ text: promptText }],
+        });
+      }
+
+      const reqBody: any = {
+        contents,
+        generationConfig: {
+          temperature: 0.7,
+        },
+      };
+
+      if (systemInstruction) {
+        reqBody.systemInstruction = {
+          parts: [{ text: systemInstruction }],
+        };
+      }
+
+      const geminiModelAlias = cleanModel
+        .replace("gemini-3.1-flash-lite", "gemini-2.5-flash")
+        .replace("gemini-3.8-flash", "gemini-2.5-flash")
+        .replace("gemini-flash-latest", "gemini-2.5-flash");
+
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${geminiModelAlias}:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(reqBody),
+        }
+      );
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Gemini direct API error: ${res.status} - ${errText}`);
+      }
+
+      const data = await res.json();
+      const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!reply) {
+        throw new Error("No response text found in Gemini payload.");
+      }
+
+      return {
+        reply,
+        model: `Sajjat AI (${geminiModelAlias} client)`,
+        timestamp: new Date().toISOString(),
+      };
+    } else {
+      let endpoint = "https://openrouter.ai/api/v1/chat/completions";
+      if (activeProviderId === "grok") endpoint = "https://api.x.ai/v1/chat/completions";
+      else if (activeProviderId === "deepseek") endpoint = "https://api.deepseek.com/chat/completions";
+      else if (activeProviderId === "cerebras") endpoint = "https://api.cerebras.ai/v1/chat/completions";
+      else if (activeProviderId === "mistral") endpoint = "https://api.mistral.ai/v1/chat/completions";
+
+      const messages: any[] = [];
+      if (systemInstruction) {
+        messages.push({ role: "system", content: systemInstruction });
+      }
+
+      history.forEach((msg) => {
+        messages.push({
+          role: msg.sender === "user" ? "user" : "assistant",
+          content: msg.text,
+        });
+      });
+
+      let promptText = message;
+      if (attachedFile && !attachedFile.isImage && attachedFile.content) {
+        promptText = `[File: ${attachedFile.name}]\n\n${attachedFile.content}\n\nQuestion:\n${message}`;
+      }
+
+      if (imageBase64 || (attachedFile && attachedFile.isImage && attachedFile.base64)) {
+        const imgB64 = imageBase64 || attachedFile?.base64 || "";
+        const imgMime = imageMimeType || attachedFile?.type || "image/jpeg";
+        const finalUrl = imgB64.startsWith("data:") ? imgB64 : `data:${imgMime};base64,${imgB64}`;
+
+        messages.push({
+          role: "user",
+          content: [
+            { type: "text", text: promptText },
+            { type: "image_url", image_url: { url: finalUrl } },
+          ],
+        });
+      } else {
+        messages.push({
+          role: "user",
+          content: promptText,
+        });
+      }
+
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: cleanModel,
+          messages,
+          temperature: 0.7,
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`${activeProviderId} direct completion error: ${res.status} - ${errText}`);
+      }
+
+      const data = await res.json();
+      const reply = data.choices?.[0]?.message?.content;
+      if (!reply) {
+        throw new Error(`Empty reply from ${activeProviderId}.`);
+      }
+
+      return {
+        reply,
+        model: `Sajjat AI (${activeProviderId} direct)`,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  } catch (err: any) {
+    console.error("Direct client API call failed:", err);
+    throw err;
+  }
+}
+
 export async function sendChatMessage(params: SendChatParams): Promise<ChatResponse> {
   const { 
     message, 
@@ -464,6 +665,23 @@ export async function sendChatMessage(params: SendChatParams): Promise<ChatRespo
       }
     } catch (e) {
       console.warn("Direct image intent generation error:", e);
+    }
+  }
+
+  const isNetlify = typeof window !== "undefined" && 
+    (window.location.hostname.includes("netlify.app") || window.location.hostname.includes("netlify.com") || window.location.hostname.includes("static"));
+
+  if (isNetlify) {
+    try {
+      const directResponse = await sendChatMessageDirectToProvider(params);
+      return directResponse;
+    } catch (directErr: any) {
+      console.error("Direct Netlify provider call failed:", directErr);
+      return {
+        reply: generateClientFallbackReply(message, attachedFile?.name),
+        model: "Sajjat AI Neural Core (Netlify Backup)",
+        timestamp: new Date().toISOString()
+      };
     }
   }
 
@@ -502,22 +720,32 @@ export async function sendChatMessage(params: SendChatParams): Promise<ChatRespo
       }
     } catch (networkError: any) {
       if (attempt === 1) {
-        console.warn("API network call failed, activating smart local engine fallback:", networkError?.message);
-        const fallbackText = generateClientFallbackReply(message, attachedFile?.name);
-        return {
-          reply: fallbackText,
-          model: "Sajjat AI Neural Core",
-          timestamp: new Date().toISOString()
-        };
+        console.warn("API network call failed, activating direct client provider proxy:", networkError?.message);
+        try {
+          const directResponse = await sendChatMessageDirectToProvider(params);
+          return directResponse;
+        } catch (directErr: any) {
+          console.warn("Direct client provider proxy also failed, falling back to local script:", directErr?.message);
+          return {
+            reply: generateClientFallbackReply(message, attachedFile?.name),
+            model: "Sajjat AI Neural Core (Offline)",
+            timestamp: new Date().toISOString()
+          };
+        }
       }
     }
   }
 
-  return {
-    reply: generateClientFallbackReply(message, attachedFile?.name),
-    model: "Sajjat AI Assistant",
-    timestamp: new Date().toISOString()
-  };
+  try {
+    const directResponse = await sendChatMessageDirectToProvider(params);
+    return directResponse;
+  } catch (directErr) {
+    return {
+      reply: generateClientFallbackReply(message, attachedFile?.name),
+      model: "Sajjat AI Assistant",
+      timestamp: new Date().toISOString()
+    };
+  }
 }
 
 export interface EditImageParams {
