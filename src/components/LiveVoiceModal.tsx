@@ -124,6 +124,126 @@ function base64ToFloat32(base64: string): Float32Array {
   return float32;
 }
 
+// Flawless Client-Side Google TTS Audio player for perfect Bengali on all devices
+function playBengaliSpeechOnClient(
+  text: string, 
+  lang: "bn-BD" | "en-US", 
+  onStart: () => void, 
+  onEnd: () => void
+): () => void {
+  try {
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel(); // cancel any active browser TTS
+    }
+
+    const cleanText = text.replace(/[*_#`]|```[\s\S]*?```/g, " ").trim();
+    if (!cleanText) {
+      onEnd();
+      return () => {};
+    }
+
+    const targetLang = lang === "en-US" ? "en" : "bn";
+    
+    // Split text into chunks of max 150 characters to keep within Google Translate's limit
+    const sentences = cleanText.match(/[^,.;।!?\n]+[,.;।!?\n]*/g) || [cleanText];
+    const chunks: string[] = [];
+    let currentChunk = "";
+
+    for (const sentence of sentences) {
+      if ((currentChunk + sentence).length > 150) {
+        if (currentChunk.trim()) chunks.push(currentChunk.trim());
+        currentChunk = sentence;
+      } else {
+        currentChunk += " " + sentence;
+      }
+    }
+    if (currentChunk.trim()) {
+      chunks.push(currentChunk.trim());
+    }
+
+    if (chunks.length === 0) {
+      onEnd();
+      return () => {};
+    }
+
+    let currentIdx = 0;
+    let audio: HTMLAudioElement | null = null;
+    let isCancelled = false;
+
+    onStart();
+
+    const playNextChunk = () => {
+      if (isCancelled) return;
+      if (currentIdx >= chunks.length) {
+        onEnd();
+        return;
+      }
+
+      const chunkText = chunks[currentIdx];
+      const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${targetLang}&client=tw-ob&q=${encodeURIComponent(chunkText)}`;
+      
+      audio = new Audio(ttsUrl);
+      audio.play().then(() => {
+        if (isCancelled) {
+          try { audio?.pause(); } catch {}
+          return;
+        }
+        currentIdx++;
+        audio!.onended = () => {
+          playNextChunk();
+        };
+        audio!.onerror = () => {
+          console.warn("Google TTS chunk playback failed, trying next chunk...");
+          currentIdx++;
+          playNextChunk();
+        };
+      }).catch((playErr) => {
+        console.warn("Audio play blocked or failed. Falling back to native SpeechSynthesis:", playErr);
+        if (isCancelled) return;
+        playNativeSpeechFallback(cleanText, lang, onStart, onEnd);
+      });
+    };
+
+    playNextChunk();
+
+    return () => {
+      isCancelled = true;
+      if (audio) {
+        try {
+          audio.pause();
+          audio.src = "";
+        } catch {}
+      }
+    };
+  } catch (err) {
+    console.error("playBengaliSpeechOnClient error:", err);
+    onEnd();
+    return () => {};
+  }
+}
+
+// Fallback native SpeechSynthesis if Audio playback is strictly blocked
+function playNativeSpeechFallback(text: string, lang: "bn-BD" | "en-US", onStart: () => void, onEnd: () => void) {
+  if (!("speechSynthesis" in window)) {
+    onEnd();
+    return;
+  }
+  try {
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = lang === "en-US" ? "en-US" : "bn-BD";
+    const voices = window.speechSynthesis.getVoices();
+    const matchingVoice = voices.find(v => v.lang.includes(lang === "en-US" ? "en" : "bn"));
+    if (matchingVoice) utterance.voice = matchingVoice;
+
+    utterance.onstart = onStart;
+    utterance.onend = onEnd;
+    utterance.onerror = onEnd;
+    window.speechSynthesis.speak(utterance);
+  } catch {
+    onEnd();
+  }
+}
+
 export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
   isOpen,
   onClose,
@@ -161,6 +281,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
   const inputAudioCtxRef = useRef<AudioContext | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const micAnalyserRef = useRef<AnalyserNode | null>(null);
+  const clientAudioCancelRef = useRef<(() => void) | null>(null);
 
   const outputAudioCtxRef = useRef<AudioContext | null>(null);
   const outputAnalyserRef = useRef<AnalyserNode | null>(null);
@@ -342,6 +463,10 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
     }
 
     // 8. Stop speech recognition & synthesis if running natively
+    if (clientAudioCancelRef.current) {
+      try { clientAudioCancelRef.current(); } catch {}
+      clientAudioCancelRef.current = null;
+    }
     if (speechRecRef.current) {
       try {
         speechRecRef.current.onend = null;
@@ -369,7 +494,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
   }, [stopAllAudioPlayback]);
 
   // Fallback: Browser Native Live Voice Mode (for Netlify, Vercel, or static hosts where WS server is missing)
-  const startBrowserNativeVoice = useCallback(() => {
+  const startBrowserNativeVoice = useCallback(async () => {
     cleanupAllAudio();
     isBrowserNativeRef.current = true;
     setErrorMessage("");
@@ -384,6 +509,55 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       setErrorMessage("আপনার ব্রাউজারে ভয়েস রিকগনিশন সাপোর্ট করে না। অনুগ্রহ করে Google Chrome, Microsoft Edge অথবা Mobile Chrome ব্রাউজার ব্যবহার করুন।");
       setCallStatus("error");
       return;
+    }
+
+    // Warm up microphone and set up audio visualizer bouncing animation!
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      });
+      micStreamRef.current = stream;
+
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const inputCtx = new AudioCtx();
+      inputAudioCtxRef.current = inputCtx;
+
+      const source = inputCtx.createMediaStreamSource(stream);
+      const analyser = inputCtx.createAnalyser();
+      analyser.fftSize = 64;
+      micAnalyserRef.current = analyser;
+      source.connect(analyser);
+
+      const micDataArray = new Uint8Array(analyser.frequencyBinCount);
+
+      // Start the bouncing animation loop
+      const updateVolumeLoop = () => {
+        if (!isComponentMounted.current) return;
+
+        if (micAnalyserRef.current && !isMuted) {
+          micAnalyserRef.current.getByteFrequencyData(micDataArray);
+          let sum = 0;
+          for (let i = 0; i < micDataArray.length; i++) {
+            sum += micDataArray[i];
+          }
+          const avg = sum / micDataArray.length;
+          setMicVolume(Math.min(1, avg / 128));
+        } else {
+          setMicVolume(0);
+        }
+
+        animFrameRef.current = requestAnimationFrame(updateVolumeLoop);
+      };
+      updateVolumeLoop();
+
+    } catch (permErr: any) {
+      console.warn("Audio context visualization warmup failed or denied:", permErr);
     }
 
     try {
@@ -449,40 +623,31 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
               onAddExchangeToChat(userText, replyText);
             }
 
-            if ("speechSynthesis" in window) {
-              window.speechSynthesis.cancel();
-              const cleanSpeech = replyText.replace(/[*_#`]|```[\s\S]*?```/g, " ").trim();
-              const utterance = new SpeechSynthesisUtterance(cleanSpeech);
-              utterance.lang = language === "en-US" ? "en-US" : "bn-BD";
-              utterance.rate = parseFloat(systemSettings?.liveVoiceSpeed || "1.0");
-
-              const voices = window.speechSynthesis.getVoices();
-              const matchingVoice = voices.find(v => v.lang.includes(language === "en-US" ? "en" : "bn"));
-              if (matchingVoice) utterance.voice = matchingVoice;
-
-              utterance.onstart = () => {
-                setCallStatus("speaking");
-                setAiVolume(0.8);
-              };
-
-              utterance.onend = () => {
-                setAiVolume(0);
-                setCallStatus("listening");
-                try { rec.start(); } catch {}
-              };
-
-              utterance.onerror = () => {
-                setAiVolume(0);
-                setCallStatus("listening");
-                try { rec.start(); } catch {}
-              };
-
-              window.speechSynthesis.speak(utterance);
-            } else {
-              setCallStatus("listening");
-              try { rec.start(); } catch {}
+            // High-fidelity chunked Google TTS Audio Player with native fallback
+            if (clientAudioCancelRef.current) {
+              clientAudioCancelRef.current();
             }
-          } catch {
+
+            const cleanSpeech = replyText.replace(/[*_#`]|```[\s\S]*?```/g, " ").trim();
+            
+            const cancelTTS = playBengaliSpeechOnClient(
+              cleanSpeech,
+              language,
+              () => {
+                setCallStatus("speaking");
+                setAiVolume(0.85); // Bounce visualizer loudly when AI speaks!
+              },
+              () => {
+                setAiVolume(0);
+                setCallStatus("listening");
+                try { rec.start(); } catch {}
+              }
+            );
+
+            clientAudioCancelRef.current = cancelTTS || null;
+
+          } catch (chatErr) {
+            console.error("Chat message failed in browser native voice:", chatErr);
             setCallStatus("listening");
             try { rec.start(); } catch {}
           }
@@ -508,7 +673,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       setErrorMessage("লাইভ ভয়েস চালু করতে সমস্যা হয়েছে: " + err.message);
       setCallStatus("error");
     }
-  }, [cleanupAllAudio, language, playTone, onAddExchangeToChat, systemSettings, callStatus]);
+  }, [cleanupAllAudio, language, playTone, onAddExchangeToChat, systemSettings, callStatus, isMuted]);
 
   // Start the live bidirectional session
   const startLiveSession = useCallback(async () => {
