@@ -2242,6 +2242,10 @@ REAL-TIME TWO-WAY LIVE VOICE CONVERSATION DIRECTIVES:
       if (isClosed || !session) return;
       try {
         const msg = JSON.parse(raw.toString());
+        if (msg.type === "ping") {
+          clientWs.send(JSON.stringify({ type: "pong" }));
+          return;
+        }
         if (msg.type === "audio" && msg.data) {
           // Realtime 16kHz PCM audio chunk from client microphone
           session.sendRealtimeInput({

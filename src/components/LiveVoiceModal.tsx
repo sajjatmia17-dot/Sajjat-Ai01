@@ -256,6 +256,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [language, setLanguage] = useState<"bn-BD" | "en-US">("bn-BD");
   const [selectedVoice, setSelectedVoice] = useState<string>(systemSettings?.liveVoiceName || "Zephyr");
+  const [isNativeFallback, setIsNativeFallback] = useState<boolean>(false);
 
   useEffect(() => {
     if (systemSettings?.liveVoiceName) {
@@ -289,6 +290,9 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
   const nextStartTimeRef = useRef<number>(0);
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const callStatusRef = useRef<LiveCallStatus>(callStatus);
+
+  const heartbeatIntervalRef = useRef<any>(null);
+  const wsRetryCountRef = useRef<number>(0);
 
   useEffect(() => {
     callStatusRef.current = callStatus;
@@ -471,6 +475,12 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       wsRef.current = null;
     }
 
+    // 7.5 Clear heartbeat interval
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
+
     // 8. Stop speech recognition & synthesis if running natively
     if (clientAudioCancelRef.current) {
       try { clientAudioCancelRef.current(); } catch {}
@@ -507,6 +517,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
   const startBrowserNativeVoice = useCallback(async () => {
     cleanupAllAudio();
     isBrowserNativeRef.current = true;
+    setIsNativeFallback(true);
     setErrorMessage("");
     setCallStatus("connecting");
     setCallDuration(0);
@@ -707,6 +718,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
   // Start the live bidirectional session
   const startLiveSession = useCallback(async () => {
     cleanupAllAudio();
+    setIsNativeFallback(false);
     setErrorMessage("");
 
     if (systemSettings && systemSettings.liveVoiceEnabled === false) {
@@ -844,6 +856,19 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
 
       ws.onopen = () => {
         console.log("WebSocket connected to /api/live");
+        wsRetryCountRef.current = 0; // Reset retry count upon successful connection
+
+        // Start 12-second heartbeat ping packet to prevent Cloud Run scaling down or killing connection on silence
+        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = setInterval(() => {
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            try {
+              wsRef.current.send(JSON.stringify({ type: "ping" }));
+            } catch (err) {
+              console.error("Failed to send heartbeat ping:", err);
+            }
+          }
+        }, 12000);
       };
 
       ws.onmessage = (event) => {
@@ -902,20 +927,51 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       };
 
       ws.onerror = (err) => {
-        console.warn("Server WebSocket unavailable (e.g. Netlify/Static host). Activating Browser Native Live Voice Mode...", err);
-        try { ws.close(); } catch {}
-        startBrowserNativeVoice();
+        console.warn(`WebSocket error (attempt ${wsRetryCountRef.current + 1}/3):`, err);
       };
 
-      ws.onclose = () => {
-        console.log("Live WebSocket closed");
-        if (callStatus !== "error" && !isBrowserNativeRef.current) {
-          setCallStatus("closed");
+      ws.onclose = (event) => {
+        console.log("WebSocket connection closed:", event);
+        if (heartbeatIntervalRef.current) {
+          clearInterval(heartbeatIntervalRef.current);
+          heartbeatIntervalRef.current = null;
+        }
+
+        if (isComponentMounted.current && !isBrowserNativeRef.current && callStatusRef.current !== "closed") {
+          if (wsRetryCountRef.current < 3) {
+            wsRetryCountRef.current += 1;
+            setCallStatus("connecting");
+            setErrorMessage(`সার্ভারের সাথে পুনরায় সংযোগ করা হচ্ছে (চেষ্টা ${wsRetryCountRef.current}/3)…`);
+            setTimeout(() => {
+              if (isComponentMounted.current && !isBrowserNativeRef.current) {
+                startLiveSession();
+              }
+            }, 2500);
+          } else {
+            console.warn("WebSocket reconnection failed after 3 attempts. Falling back to Browser Native Voice...");
+            setErrorMessage("সার্ভারের সাথে সংযোগ ব্যাহত হয়েছে। ব্রাউজার লোকাল ভয়েস চ্যাট চালু করা হচ্ছে...");
+            setTimeout(() => {
+              if (isComponentMounted.current) {
+                startBrowserNativeVoice();
+              }
+            }, 2000);
+          }
         }
       };
     } catch (wsErr: any) {
-      console.warn("WebSocket creation failed, using Browser Native Live Voice Mode:", wsErr);
-      startBrowserNativeVoice();
+      console.warn("WebSocket initialization thrown, retrying or falling back:", wsErr);
+      if (wsRetryCountRef.current < 3) {
+        wsRetryCountRef.current += 1;
+        setCallStatus("connecting");
+        setErrorMessage(`সার্ভারের সাথে পুনরায় সংযোগ করা হচ্ছে (চেষ্টা ${wsRetryCountRef.current}/3)…`);
+        setTimeout(() => {
+          if (isComponentMounted.current) {
+            startLiveSession();
+          }
+        }, 2500);
+      } else {
+        startBrowserNativeVoice();
+      }
     }
   }, [
     cleanupAllAudio,
@@ -1061,7 +1117,21 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       <div
         id="live-voice-container"
         className="w-full max-w-lg rounded-3xl bg-slate-900/95 border border-slate-700/80 shadow-2xl flex flex-col overflow-hidden text-slate-100 relative max-h-[92vh] animate-in zoom-in-95 duration-150"
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          // Resume AudioContexts automatically on any user tap inside the modal to bypass browser autoplay blocks
+          try {
+            const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+            if (inputAudioCtxRef.current && inputAudioCtxRef.current.state === "suspended") {
+              inputAudioCtxRef.current.resume().then(() => console.log("Input AudioContext active"));
+            }
+            if (outputAudioCtxRef.current && outputAudioCtxRef.current.state === "suspended") {
+              outputAudioCtxRef.current.resume().then(() => console.log("Output AudioContext active"));
+            }
+          } catch (err) {
+            console.warn("Failed to resume AudioContexts inside modal click:", err);
+          }
+        }}
       >
         {/* Header Bar */}
         <div className="px-5 py-4 bg-slate-950/90 border-b border-slate-800 flex items-center justify-between shrink-0">
@@ -1089,17 +1159,11 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
                     className={`w-2 h-2 rounded-full ${
                       callStatus === "listening"
                         ? "bg-emerald-400 animate-ping"
-                        : callStatus === "speaking"
-                        ? "bg-cyan-400 animate-pulse"
-                        : callStatus === "connecting"
-                        ? "bg-amber-400 animate-spin"
-                        : callStatus === "muted"
-                        ? "bg-rose-400"
                         : "bg-slate-500"
                     }`}
                   />
-                  {callStatus === "connecting" && "Sajjat AI Live সংযোগ করা হচ্ছে…"}
-                  {callStatus === "listening" && "Sajjat AI Live প্রস্তুত — কথা বলুন"}
+                  {callStatus === "connecting" && (isNativeFallback ? "লোকাল ভয়েস সংযোগ করা হচ্ছে…" : "Sajjat AI Live সংযোগ করা হচ্ছে…")}
+                  {callStatus === "listening" && (isNativeFallback ? "লোকাল ব্রাউজার ভয়েস প্রস্তুত — কথা বলুন" : "Sajjat AI Live প্রস্তুত — কথা বলুন")}
                   {callStatus === "speaking" && "Sajjat AI কথা বলছে..."}
                   {callStatus === "muted" && "মাইক্রোফোন মিউট করা"}
                   {callStatus === "error" && "সংযোগ সমস্যা"}
@@ -1107,7 +1171,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
                 </span>
                 <span>•</span>
                 <span className="text-slate-400 font-mono text-[10px] bg-slate-800/80 px-1.5 py-0.5 rounded">
-                  Sajjat AI
+                  {isNativeFallback ? "লোকাল" : "লাইভ"}
                 </span>
               </div>
             </div>
@@ -1278,7 +1342,9 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
               {callStatus === "listening" && (
                 <>
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-                  <span className="text-emerald-300">Sajjat AI Live প্রস্তুত — কথা বলুন</span>
+                  <span className="text-emerald-300">
+                    {isNativeFallback ? "লোকাল ব্রাউজার ভয়েস প্রস্তুত — কথা বলুন" : "Sajjat AI Live প্রস্তুত — কথা বলুন"}
+                  </span>
                 </>
               )}
               {callStatus === "speaking" && (
@@ -1290,7 +1356,9 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
               {callStatus === "connecting" && (
                 <>
                   <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-spin" />
-                  <span className="text-amber-300">Sajjat AI Live সংযোগ করা হচ্ছে…</span>
+                  <span className="text-amber-300">
+                    {isNativeFallback ? "লোকাল ভয়েস সংযোগ করা হচ্ছে…" : "Sajjat AI Live সংযোগ করা হচ্ছে…"}
+                  </span>
                 </>
               )}
               {callStatus === "muted" && (
