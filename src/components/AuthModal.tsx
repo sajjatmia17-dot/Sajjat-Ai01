@@ -77,7 +77,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       console.error("Google Auth error:", err);
       const errCode = err?.code || "";
       if (errCode === "auth/popup-closed-by-user" || errCode === "auth/cancelled-popup-request") {
-        setError("গুগল সাইন-ইন পপআপ উইন্ডোটি বন্ধ করা হয়েছে।");
+        setError("গুগল সাইন-ইন পপআপ উইন্ডোটি বন্ধ করা হয়েছে। কোনো সমস্যা নেই! আপনি নিচে ইমেইল ও পাসওয়ার্ড লিখে ১ সেকেন্ডে একাউন্ট খুলতে পারেন, অথবা নিচে 'গেস্ট হিসেবে চালিয়ে যান' বাটনে ক্লিক করে একাউন্ট ছাড়াই ফ্রিতে ব্যবহার করতে পারেন।");
       } else if (errCode === "auth/popup-blocked") {
         setError("আপনার ব্রাউজারে পপআপ ব্লক করা আছে। পপআপ অপশনটি চালু করে আবার চেষ্টা করুন।");
       } else if (errCode === "auth/unauthorized-domain" || String(err).includes("auth/unauthorized-domain")) {
@@ -319,7 +319,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               type="button"
               onClick={handleGoogleAuth}
               disabled={loading || googleLoading}
-              className="w-full py-3 px-4 bg-slate-950 hover:bg-slate-800 text-slate-100 font-bold text-xs rounded-xl border border-slate-700/80 shadow-md flex items-center justify-center gap-2.5 transition-all active:scale-[0.98] disabled:opacity-50 cursor-pointer mb-3.5 hover:border-indigo-500/50 group"
+              className="w-full py-3 px-4 bg-slate-950 hover:bg-slate-800 text-slate-100 font-bold text-xs rounded-xl border border-slate-700/80 shadow-md flex items-center justify-center gap-2.5 transition-all active:scale-[0.98] disabled:opacity-50 cursor-pointer mb-2.5 hover:border-indigo-500/50 group"
             >
               {googleLoading ? (
                 <>
@@ -351,6 +351,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   </span>
                 </>
               )}
+            </button>
+
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-full py-2.5 px-4 bg-slate-950 hover:bg-slate-800 text-slate-300 hover:text-white font-medium text-xs rounded-xl border border-slate-800/80 shadow-sm flex items-center justify-center gap-2 transition-all active:scale-[0.98] cursor-pointer mb-3.5 hover:border-cyan-500/30"
+            >
+              <User className="w-3.5 h-3.5 text-cyan-400" />
+              <span>গেস্ট হিসেবে একাউন্ট ছাড়াই চালিয়ে যান</span>
             </button>
 
             <div className="relative my-3.5">

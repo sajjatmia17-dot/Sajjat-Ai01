@@ -47,7 +47,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         return <Zap className="w-4 h-4 text-amber-400" />;
       case "gemini-3.8-flash":
         return <BrainCircuit className="w-4 h-4 text-indigo-400" />;
-      case "gemini-flash-latest":
+      case "gemini-3.6-flash":
         return <Sparkles className="w-4 h-4 text-cyan-400" />;
       default:
         return <Cpu className="w-4 h-4 text-slate-400" />;

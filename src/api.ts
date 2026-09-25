@@ -3,6 +3,25 @@ import { generateClientFallbackReply } from "./knowledge";
 import { database } from "./firebase";
 import { ref, get } from "firebase/database";
 
+export function getBackendBaseUrl(): string {
+  if (typeof window === "undefined") return "";
+  const host = window.location.hostname;
+  if (
+    host.includes("localhost") || 
+    host.includes("127.0.0.1") || 
+    host.includes("asia-southeast1.run.app")
+  ) {
+    return window.location.origin;
+  }
+  // Fallback to the production Cloud Run URL
+  return "https://ais-pre-muefpa2tovs5je5tgghvb7-797513251199.asia-southeast1.run.app";
+}
+
+export function getBackendWsUrl(): string {
+  const baseUrl = getBackendBaseUrl();
+  return baseUrl.replace(/^http/, "ws");
+}
+
 interface SendChatParams {
   message: string;
   history?: ChatMessage[];
@@ -405,7 +424,7 @@ export async function generateAiImageApi(params: GenerateImageParams): Promise<G
   const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout
 
   try {
-    const res = await fetch("/api/generate-image", {
+    const res = await fetch(`${getBackendBaseUrl()}/api/generate-image`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params),
@@ -484,7 +503,7 @@ async function sendChatMessageDirectToProvider(params: SendChatParams): Promise<
       providerModelId = "gemini-3.8-flash";
     }
 
-    const cleanModel = providerModelId || "gemini-1.5-flash";
+    const cleanModel = providerModelId || "gemini-3.6-flash";
 
     // 4. Make direct request depending on the provider ID
     if (activeProviderId === "gemini") {
@@ -531,9 +550,9 @@ async function sendChatMessageDirectToProvider(params: SendChatParams): Promise<
       }
 
       const geminiModelAlias = cleanModel
-        .replace("gemini-3.1-flash-lite", "gemini-2.5-flash")
-        .replace("gemini-3.8-flash", "gemini-2.5-flash")
-        .replace("gemini-flash-latest", "gemini-2.5-flash");
+        .replace("gemini-1.5-flash", "gemini-3.6-flash")
+        .replace("gemini-2.5-flash", "gemini-3.6-flash")
+        .replace("gemini-2.0-flash", "gemini-3.6-flash");
 
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${geminiModelAlias}:generateContent?key=${apiKey}`,
@@ -697,7 +716,7 @@ export async function sendChatMessage(params: SendChatParams): Promise<ChatRespo
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
 
-      const res = await fetch("/api/chat", {
+      const res = await fetch(`${getBackendBaseUrl()}/api/chat`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -771,7 +790,7 @@ export async function editAiImageApi(params: EditImageParams): Promise<EditImage
   const timeoutId = setTimeout(() => controller.abort(), 15000);
 
   try {
-    const res = await fetch("/api/edit-image", {
+    const res = await fetch(`${getBackendBaseUrl()}/api/edit-image`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params),

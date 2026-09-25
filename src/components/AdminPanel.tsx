@@ -78,6 +78,7 @@ import {
 } from "../firebase";
 import { ref, get } from "firebase/database";
 import { AdminBookLibrary } from "./admin/AdminBookLibrary";
+import { getBackendBaseUrl } from "../api";
 import { AdminApiProviders } from "./admin/AdminApiProviders";
 import { AdminChatManager } from "./admin/AdminChatManager";
 import { AdminVoiceAndFiles } from "./admin/AdminVoiceAndFiles";
@@ -276,7 +277,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
       // Sync to server in-memory settings
       try {
-        await fetch("/api/system-settings", {
+        await fetch(`${getBackendBaseUrl()}/api/system-settings`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
@@ -400,7 +401,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setAiTestResult(null);
 
     try {
-      const res = await fetch("/api/admin/test-ai", {
+      const res = await fetch(`${getBackendBaseUrl()}/api/admin/test-ai`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -425,7 +426,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     try {
       // If custom key entered, update server memory
       if (customKeyInput.trim()) {
-        await fetch("/api/admin/set-key", {
+        await fetch(`${getBackendBaseUrl()}/api/admin/set-key`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ apiKey: customKeyInput.trim() }),

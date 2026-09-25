@@ -16,6 +16,17 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
+// Enable lightweight CORS for cross-origin requests from Netlify
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, PATCH, DELETE");
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 // Sajjat AI System Instruction
 const SAJJAT_AI_SYSTEM_INSTRUCTION = `
 You are "Sajjat AI" (v3.9) — an ultra-intelligent, respectful, and helpful AI assistant created and owned by Sajjat Mia.
@@ -275,7 +286,7 @@ ${fileContext.slice(0, 300)}...
 
 // Admin Provider Keys store in server memory
 const serverProviderConfigs: Record<string, { apiKey: string; modelId: string; enabled: boolean }> = {
-  gemini: { apiKey: process.env.GEMINI_API_KEY || "", modelId: "gemini-2.5-flash", enabled: true },
+  gemini: { apiKey: process.env.GEMINI_API_KEY || "", modelId: "gemini-3.6-flash", enabled: true },
   grok: { apiKey: process.env.GROK_API_KEY || "", modelId: "grok-beta", enabled: false },
   deepseek: { apiKey: process.env.DEEPSEEK_API_KEY || "", modelId: "deepseek-chat", enabled: false },
   openrouter: { apiKey: process.env.OPENROUTER_API_KEY || "", modelId: "openai/gpt-4o-mini", enabled: false },
@@ -460,6 +471,44 @@ app.post("/api/admin/save-provider", (req, res) => {
     message: `${providerId} কনফিগারেশন সফলভাবে সার্ভারে সংরক্ষিত হয়েছে।`,
     activeProvider: serverActiveProvider
   });
+});
+
+// TTS (Text-To-Speech) Proxy Route to prevent CORS/referer blocks in browser
+app.get("/api/tts", async (req, res) => {
+  const text = req.query.text as string;
+  const lang = (req.query.lang as string) || "bn";
+
+  if (!text) {
+    return res.status(400).send("Text query parameter is required.");
+  }
+
+  try {
+    const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(
+      text
+    )}&tl=${lang}&client=tw-ob`;
+
+    const response = await fetch(ttsUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+        "Referer": "https://translate.google.com/",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Google TTS returned status: ${response.status}`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Length", buffer.length);
+    res.setHeader("Cache-Control", "public, max-age=86400"); // Cache for 1 day
+    res.send(buffer);
+  } catch (err: any) {
+    console.error("TTS Proxy error:", err);
+    res.status(500).send(err.message || "TTS conversion failed");
+  }
 });
 
 // Admin Test Provider Connection (for all 9 providers)
@@ -908,12 +957,9 @@ app.post("/api/chat", async (req, res) => {
 
         // Resilient model list to automatically handle 503 high demand spikes and rate limits
         const baseModels = [
-          "gemini-2.5-flash",
-          "gemini-flash-latest",
+          "gemini-3.6-flash",
           "gemini-3.8-flash",
-          "gemini-3.1-flash-lite",
-          "gemini-2.0-flash",
-          "gemini-1.5-flash"
+          "gemini-3.1-flash-lite"
         ];
 
         // If user specified a preferred model, prioritize it first
@@ -1444,7 +1490,7 @@ async function generateAiImage(
 
   const containsBengali = /[\u0980-\u09FF]/.test(userPrompt);
   if (containsBengali || userPrompt.trim().length > 0) {
-    const translationModels = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-1.5-flash"];
+    const translationModels = ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite"];
     let translatedText = "";
     
     for (const modelName of translationModels) {
@@ -1922,7 +1968,7 @@ app.post("/api/edit-image", async (req, res) => {
       // Let's ask Gemini Text to describe the edited scene based on original image + instruction
       let refinedPrompt = `A high-quality edited version of the image with the changes: ${instruction}`;
       try {
-        const textModels = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-1.5-flash"];
+        const textModels = ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite"];
         for (const model of textModels) {
           try {
             const analysisPrompt = {
@@ -1971,7 +2017,7 @@ Rules:
         const isBangla = /[\u0980-\u09FF]/.test(instruction);
         if (isBangla) {
           try {
-            const translationModels = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-3.8-flash", "gemini-3.1-flash-lite"];
+            const translationModels = ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite"];
             for (const tModel of translationModels) {
               try {
                 const translationRes = await ai.models.generateContent({

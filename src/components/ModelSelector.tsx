@@ -44,7 +44,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
         return <Zap className="w-3.5 h-3.5 text-amber-400" />;
       case "gemini-3.8-flash":
         return <BrainCircuit className="w-3.5 h-3.5 text-indigo-400" />;
-      case "gemini-flash-latest":
+      case "gemini-3.6-flash":
         return <Sparkles className="w-3.5 h-3.5 text-cyan-400" />;
       default:
         return <Cpu className="w-3.5 h-3.5 text-slate-400" />;

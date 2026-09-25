@@ -14,6 +14,7 @@ import {
   DollarSign
 } from "lucide-react";
 import { PremiumPackage, SystemSettingsConfig } from "../../types";
+import { getBackendBaseUrl } from "../../api";
 import { 
   subscribeToPackages, 
   savePackage, 
@@ -117,7 +118,7 @@ export const AdminLimitsAndPackages: React.FC = () => {
 
       // Also sync to server memory
       try {
-        await fetch("/api/system-settings", {
+        await fetch(`${getBackendBaseUrl()}/api/system-settings`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ aiLimitSystemEnabled: newVal })

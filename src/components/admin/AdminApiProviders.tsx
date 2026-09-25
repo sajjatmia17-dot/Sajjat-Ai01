@@ -17,6 +17,7 @@ import {
   ChevronDown
 } from "lucide-react";
 import { ApiProviderConfig, AdminApiProviderKey } from "../../types";
+import { getBackendBaseUrl } from "../../api";
 import { 
   subscribeToApiProviders, 
   saveApiProviderConfig,
@@ -180,7 +181,7 @@ export const AdminApiProviders: React.FC<AdminApiProvidersProps> = ({ onProvider
     }));
 
     try {
-      const res = await fetch("/api/admin/test-provider", {
+      const res = await fetch(`${getBackendBaseUrl()}/api/admin/test-provider`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -239,7 +240,7 @@ export const AdminApiProviders: React.FC<AdminApiProvidersProps> = ({ onProvider
       await saveApiProviderConfig(provider);
 
       // 2. Save on Server memory for active proxying
-      await fetch("/api/admin/save-provider", {
+      await fetch(`${getBackendBaseUrl()}/api/admin/save-provider`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -284,7 +285,7 @@ export const AdminApiProviders: React.FC<AdminApiProvidersProps> = ({ onProvider
       });
 
       // Update server
-      await fetch("/api/admin/save-provider", {
+      await fetch(`${getBackendBaseUrl()}/api/admin/save-provider`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

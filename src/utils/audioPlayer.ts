@@ -1,4 +1,5 @@
 // Sajjat AI Intelligent Voice Synthesis & Audio Engine
+import { getBackendBaseUrl } from "../api";
 
 export type VoiceState = "stopped" | "playing" | "paused";
 
@@ -149,8 +150,8 @@ export function playAiVoice(
     );
   }
 
-  // Choose best path: Native Web Speech if voice exists, else Audio Stream
-  if (hasWebSpeech && (hasNativeBengaliVoice || !hasBangla)) {
+  // Choose best path: Always use Google Audio TTS for Bangla to get high-quality natural pronunciation, Web Speech for pure English
+  if (hasWebSpeech && !hasBangla) {
     playWebSpeech(cleanText, callbacks);
   } else {
     playGoogleAudioTts(cleanText, callbacks);
@@ -306,9 +307,7 @@ function playGoogleAudioTts(cleanText: string, callbacks?: VoiceCallbacks) {
     const chunkText = chunks[index];
     index++;
 
-    const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(
-      chunkText
-    )}&tl=${lang}&client=gtx`;
+    const ttsUrl = `${getBackendBaseUrl()}/api/tts?text=${encodeURIComponent(chunkText)}&lang=${lang}`;
 
     const audio = new Audio();
     activeAudioElement = audio;

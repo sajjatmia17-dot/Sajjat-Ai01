@@ -19,7 +19,7 @@ import {
   WifiOff
 } from "lucide-react";
 import { UserProfile, SystemSettingsConfig } from "../types";
-import { sendChatMessage } from "../api";
+import { sendChatMessage, getBackendBaseUrl, getBackendWsUrl } from "../api";
 
 interface LiveVoiceModalProps {
   isOpen: boolean;
@@ -180,7 +180,7 @@ function playBengaliSpeechOnClient(
       }
 
       const chunkText = chunks[currentIdx];
-      const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${targetLang}&client=gtx&q=${encodeURIComponent(chunkText)}`;
+      const ttsUrl = `${getBackendBaseUrl()}/api/tts?text=${encodeURIComponent(chunkText)}&lang=${targetLang}`;
       
       audio = new Audio(ttsUrl);
       (audio as any).referrerPolicy = "no-referrer";
@@ -717,21 +717,6 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       return;
     }
 
-    // Detect if running on Netlify or another static hosting environment
-    const isLocalOrStudio = typeof window !== "undefined" && (
-      window.location.hostname.includes("localhost") || 
-      window.location.hostname.includes("127.0.0.1") || 
-      window.location.hostname.includes("asia-southeast1.run.app") || 
-      window.location.hostname.includes("google.com")
-    );
-    const isNetlify = !isLocalOrStudio;
-
-    if (isNetlify) {
-      console.log("[LiveVoiceModal] Netlify static host detected. Starting ultra-reliable high-fidelity browser native live voice mode instantly.");
-      startBrowserNativeVoice();
-      return;
-    }
-
     setCallStatus("connecting");
     setCallDuration(0);
     setLiveTranscript("");
@@ -846,10 +831,9 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
 
     // 3. Connect to server WebSocket (/api/live)
     try {
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const host = window.location.host;
+      const wsBase = getBackendWsUrl();
       const customKey = localStorage.getItem("sajjat_custom_gemini_key") || "";
-      const wsUrl = `${protocol}//${host}/api/live?voice=${encodeURIComponent(
+      const wsUrl = `${wsBase}/api/live?voice=${encodeURIComponent(
         selectedVoice
       )}&lang=${encodeURIComponent(language)}${
         customKey ? `&key=${encodeURIComponent(customKey)}` : ""

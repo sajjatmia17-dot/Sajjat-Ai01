@@ -15,6 +15,7 @@ import {
   ShieldAlert
 } from "lucide-react";
 import { SystemSettingsConfig } from "../../types";
+import { getBackendBaseUrl } from "../../api";
 import { subscribeToSystemSettings, saveSystemSettings } from "../../firebase";
 
 export const AdminFeatureControl: React.FC = () => {
@@ -65,7 +66,7 @@ export const AdminFeatureControl: React.FC = () => {
 
       // Sync to server in-memory settings
       try {
-        await fetch("/api/system-settings", {
+        await fetch(`${getBackendBaseUrl()}/api/system-settings`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ [key]: newVal })
@@ -92,7 +93,7 @@ export const AdminFeatureControl: React.FC = () => {
       
       // Also update server memory
       try {
-        await fetch("/api/system-settings", {
+        await fetch(`${getBackendBaseUrl()}/api/system-settings`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(settings)

@@ -79,7 +79,7 @@ export type ModalType =
   | 'html_viewer'
   | 'live_voice';
 
-export type GeminiModelId = 'gemini-3.1-flash-lite' | 'gemini-3.8-flash' | 'gemini-flash-latest';
+export type GeminiModelId = 'gemini-3.1-flash-lite' | 'gemini-3.8-flash' | 'gemini-3.6-flash';
 
 export type AdminApiProviderKey = 
   | 'gemini' 
@@ -271,7 +271,7 @@ export const DEFAULT_API_PROVIDERS: ApiProviderConfig[] = [
     status: "connected",
     description: "Official Google Gemini AI Engine with ultra-fast responses and multimodal support.",
     defaultModel: "gemini-3.1-flash-lite",
-    supportedModels: ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest", "gemini-1.5-pro"]
+    supportedModels: ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.6-flash"]
   },
   {
     id: "grok",
@@ -391,8 +391,8 @@ export const AVAILABLE_MODELS: GeminiModelInfo[] = [
     color: "from-indigo-500 to-purple-600",
   },
   {
-    id: "gemini-flash-latest",
-    name: "Sajjat AI Flash Latest",
+    id: "gemini-3.6-flash",
+    name: "Sajjat AI 3.6 Flash",
     badge: "🚀 লেটেস্ট সংস্করণ",
     speed: "Fast (~0.6s)",
     description: "সর্বশেষ আধুনিক এআই সংস্করণের উন্নত ফিচার ও নির্ভরযোগ্য তথ্য।",

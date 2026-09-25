@@ -18,6 +18,7 @@ import {
   Layers
 } from "lucide-react";
 import { SystemSettingsConfig } from "../../types";
+import { getBackendBaseUrl } from "../../api";
 import { subscribeToSystemSettings, saveSystemSettings } from "../../firebase";
 
 const VOICE_PERSONAS = [
@@ -104,7 +105,7 @@ export const AdminVoiceAndFiles: React.FC = () => {
 
       // Also sync to server in-memory settings
       try {
-        await fetch("/api/system-settings", {
+        await fetch(`${getBackendBaseUrl()}/api/system-settings`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(settings)
@@ -130,7 +131,7 @@ export const AdminVoiceAndFiles: React.FC = () => {
     const startTime = Date.now();
 
     try {
-      const res = await fetch("/api/generate-image", {
+      const res = await fetch(`${getBackendBaseUrl()}/api/generate-image`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

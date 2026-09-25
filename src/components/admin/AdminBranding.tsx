@@ -15,6 +15,7 @@ import {
   Sparkle
 } from "lucide-react";
 import { SystemSettingsConfig } from "../../types";
+import { getBackendBaseUrl } from "../../api";
 import { subscribeToSystemSettings, saveSystemSettings } from "../../firebase";
 
 const THEME_COLORS: Array<{
@@ -144,7 +145,7 @@ export const AdminBranding: React.FC = () => {
 
       // Also sync to server in-memory settings
       try {
-        await fetch("/api/system-settings", {
+        await fetch(`${getBackendBaseUrl()}/api/system-settings`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
