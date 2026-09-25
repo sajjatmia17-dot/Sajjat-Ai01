@@ -5,20 +5,43 @@ import { ref, get } from "firebase/database";
 
 export function getBackendBaseUrl(): string {
   if (typeof window === "undefined") return "";
+
+  // 1. Explicit VITE_BACKEND_URL or VITE_APP_URL has the highest priority (safeguarded against Netlify auto-injection)
+  let envUrl = (import.meta as any).env?.VITE_BACKEND_URL || (import.meta as any).env?.VITE_APP_URL;
+  if (envUrl && !envUrl.includes("netlify.app")) {
+    if (envUrl.endsWith("/")) {
+      envUrl = envUrl.slice(0, -1);
+    }
+    return envUrl;
+  }
+
+  // 2. Auto-detect local development or Google AI Studio preview
   const host = window.location.hostname;
   if (
     host.includes("localhost") || 
     host.includes("127.0.0.1") || 
     host.includes("asia-southeast1.run.app")
   ) {
-    return window.location.origin;
+    let origin = window.location.origin;
+    if (origin.endsWith("/")) {
+      origin = origin.slice(0, -1);
+    }
+    return origin;
   }
-  // Fallback to the production Cloud Run URL
+
+  // 3. Fallback to the production Cloud Run URL
   return "https://ais-pre-muefpa2tovs5je5tgghvb7-797513251199.asia-southeast1.run.app";
 }
 
 export function getBackendWsUrl(): string {
   const baseUrl = getBackendBaseUrl();
+  if (!baseUrl) return "";
+  if (baseUrl.startsWith("https://")) {
+    return baseUrl.replace(/^https:\/\//, "wss://");
+  }
+  if (baseUrl.startsWith("http://")) {
+    return baseUrl.replace(/^http:\/\//, "ws://");
+  }
   return baseUrl.replace(/^http/, "ws");
 }
 
@@ -499,7 +522,7 @@ async function sendChatMessageDirectToProvider(params: SendChatParams): Promise<
     if (!apiKey) {
       activeProviderId = "gemini";
       const userCustomKey = localStorage.getItem("sajjat_custom_gemini_key");
-      apiKey = userCustomKey || "AIzaSyBuz2yF2QdmwNqBwHGPneEnEZvvGo5WZz0";
+      apiKey = userCustomKey || (import.meta as any).env?.VITE_GEMINI_API_KEY || "";
       providerModelId = "gemini-3.8-flash";
     }
 

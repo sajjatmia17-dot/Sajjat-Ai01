@@ -293,6 +293,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
 
   const heartbeatIntervalRef = useRef<any>(null);
   const wsRetryCountRef = useRef<number>(0);
+  const wsConnectAttemptsRef = useRef<number>(0);
 
   useEffect(() => {
     callStatusRef.current = callStatus;
@@ -716,10 +717,166 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
   }, [cleanupAllAudio, language, playTone, onAddExchangeToChat, systemSettings, callStatus, isMuted]);
 
   // Start the live bidirectional session
+  const connectWebSocketOnly = useCallback(() => {
+    if (isBrowserNativeRef.current || callStatusRef.current === "closed") return;
+
+    try {
+      const wsBase = getBackendWsUrl();
+      const customKey = localStorage.getItem("sajjat_custom_gemini_key") || "";
+      const wsUrl = `${wsBase}/api/live?voice=${encodeURIComponent(
+        selectedVoice
+      )}&lang=${encodeURIComponent(language)}${
+        customKey ? `&key=${encodeURIComponent(customKey)}` : ""
+      }`;
+
+      console.log(`[DEBUG] Connecting WebSocket only (attempt ${wsConnectAttemptsRef.current + 1}/5) to: ${wsUrl}`);
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log("WebSocket connected to /api/live");
+        console.log("[DEBUG] WebSocket opened");
+        wsConnectAttemptsRef.current = 0; // reset attempts
+        setErrorMessage("");
+        setCallStatus("listening");
+        playTone("connect");
+
+        // Start call duration timer if not already running
+        if (callTimerRef.current) clearInterval(callTimerRef.current);
+        callTimerRef.current = setInterval(() => {
+          setCallDuration((prev) => prev + 1);
+        }, 1000);
+
+        // Start 12-second heartbeat ping packet
+        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = setInterval(() => {
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            try {
+              wsRef.current.send(JSON.stringify({ type: "ping" }));
+            } catch (err) {
+              console.error("Failed to send heartbeat ping:", err);
+            }
+          }
+        }, 12000);
+      };
+
+      ws.onmessage = (event) => {
+        console.log("[DEBUG] WebSocket message received");
+        try {
+          const msg = JSON.parse(event.data);
+
+          if (msg.type === "connected") {
+            console.log("[DEBUG] Live API response received (connected)");
+            setCallStatus("listening");
+          } else if (msg.type === "audio" && msg.data) {
+            console.log(`[DEBUG] AI audio received (size: ${msg.data.length})`);
+            playAudioChunk(msg.data);
+          } else if (msg.type === "text" && msg.text) {
+            currentAiSpeechAccumulator.current += msg.text;
+            setLiveTranscript(currentAiSpeechAccumulator.current);
+          } else if (msg.type === "interrupted") {
+            playTone("interrupt");
+            stopAllAudioPlayback();
+            currentAiSpeechAccumulator.current = "";
+          } else if (msg.type === "turnComplete") {
+            const finalAiText = currentAiSpeechAccumulator.current.trim();
+            if (finalAiText) {
+              const nowTime = new Date().toLocaleTimeString("bn-BD", {
+                hour: "2-digit",
+                minute: "2-digit",
+              });
+              setTranscriptHistory((prev) => [
+                ...prev,
+                {
+                  id: `ai_${Date.now()}`,
+                  role: "assistant",
+                  text: finalAiText,
+                  time: nowTime,
+                },
+              ]);
+              if (onAddExchangeToChat) {
+                onAddExchangeToChat("🎙️ [লাইভ ভয়েস বার্তা]", finalAiText);
+              }
+            }
+            currentAiSpeechAccumulator.current = "";
+          } else if (msg.type === "error") {
+            console.error("Live server error:", msg.error);
+            console.log(`[DEBUG] Live API error: ${msg.error}`);
+            setErrorMessage(msg.error || "Sajjat AI Live সংযোগে সমস্যা দেখা দিয়েছে।");
+            setCallStatus("error");
+          } else if (msg.type === "closed") {
+            setCallStatus("closed");
+          }
+        } catch (parseErr) {
+          console.error("Error parsing WS message:", parseErr);
+        }
+      };
+
+      ws.onerror = (err) => {
+        console.log("[DEBUG] WebSocket error:", err);
+        console.warn(`WebSocket error:`, err);
+      };
+
+      ws.onclose = (event) => {
+        console.log(`[DEBUG] WebSocket closed (code: ${event.code}, reason: ${event.reason})`);
+        if (heartbeatIntervalRef.current) {
+          clearInterval(heartbeatIntervalRef.current);
+          heartbeatIntervalRef.current = null;
+        }
+
+        if (isComponentMounted.current && !isBrowserNativeRef.current && callStatusRef.current !== "closed") {
+          if (wsConnectAttemptsRef.current < 5) {
+            wsConnectAttemptsRef.current += 1;
+            setCallStatus("connecting");
+            setErrorMessage(`সার্ভারের সাথে পুনরায় সংযোগ করা হচ্ছে (চেষ্টা ${wsConnectAttemptsRef.current}/5)…`);
+            setTimeout(() => {
+              if (isComponentMounted.current && !isBrowserNativeRef.current) {
+                connectWebSocketOnly();
+              }
+            }, 2500);
+          } else {
+            console.warn("WebSocket reconnection failed after 5 attempts. Falling back to Browser Native Voice...");
+            setErrorMessage("সার্ভারের সাথে সংযোগ ব্যাহত হয়েছে। ব্রাউজার লোকাল ভয়েস চ্যাট চালু করা হচ্ছে...");
+            setTimeout(() => {
+              if (isComponentMounted.current) {
+                startBrowserNativeVoice();
+              }
+            }, 2000);
+          }
+        }
+      };
+
+    } catch (wsErr: any) {
+      console.warn("WebSocket connect thrown:", wsErr);
+      if (wsConnectAttemptsRef.current < 5) {
+        wsConnectAttemptsRef.current += 1;
+        setCallStatus("connecting");
+        setErrorMessage(`সার্ভারের সাথে পুনরায় সংযোগ করা হচ্ছে (চেষ্টা ${wsConnectAttemptsRef.current}/5)…`);
+        setTimeout(() => {
+          if (isComponentMounted.current) {
+            connectWebSocketOnly();
+          }
+        }, 2500);
+      } else {
+        startBrowserNativeVoice();
+      }
+    }
+  }, [
+    selectedVoice,
+    language,
+    playTone,
+    playAudioChunk,
+    stopAllAudioPlayback,
+    startBrowserNativeVoice,
+    onAddExchangeToChat
+  ]);
+
+  // Start the live bidirectional session
   const startLiveSession = useCallback(async () => {
     cleanupAllAudio();
     setIsNativeFallback(false);
     setErrorMessage("");
+    wsConnectAttemptsRef.current = 0; // Reset ws attempts
 
     if (systemSettings && systemSettings.liveVoiceEnabled === false) {
       setErrorMessage(
@@ -747,6 +904,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
         video: false,
       });
       micStreamRef.current = stream;
+      console.log("[DEBUG] microphone started");
     } catch (permErr: any) {
       console.error("Microphone permission denied:", permErr);
       setErrorMessage(
@@ -762,11 +920,29 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       const inputCtx = new AudioCtx();
       inputAudioCtxRef.current = inputCtx;
 
+      // Explicitly resume input context to ensure it is active and running!
+      if (inputCtx.state === "suspended") {
+        await inputCtx.resume();
+      }
+
       const source = inputCtx.createMediaStreamSource(stream);
       const analyser = inputCtx.createAnalyser();
       analyser.fftSize = 64;
       micAnalyserRef.current = analyser;
       source.connect(analyser);
+
+      // Initialize output AudioContext and explicitly resume it to bypass autoplay blocks
+      if (!outputAudioCtxRef.current || outputAudioCtxRef.current.state === "closed") {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        outputAudioCtxRef.current = new AudioCtx();
+        const analyser = outputAudioCtxRef.current.createAnalyser();
+        analyser.fftSize = 64;
+        outputAnalyserRef.current = analyser;
+        analyser.connect(outputAudioCtxRef.current.destination);
+      }
+      if (outputAudioCtxRef.current && outputAudioCtxRef.current.state === "suspended") {
+        await outputAudioCtxRef.current.resume();
+      }
 
       // Buffer size: 2048 or 4096 samples (approx ~85ms at 48kHz)
       const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
@@ -824,12 +1000,18 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
         const pcm16 = downsampleTo16kHz(boostedBuffer, inputCtx.sampleRate);
         const base64Audio = int16ToBase64(pcm16);
 
+        // ADD LOG: microphone audio chunk created
+        console.log(`[DEBUG] microphone audio chunk created (size: ${base64Audio.length})`);
+
         wsRef.current.send(
           JSON.stringify({
             type: "audio",
             data: base64Audio,
           })
         );
+
+        // ADD LOG: audio chunk sent
+        console.log("[DEBUG] audio chunk sent");
       };
 
       source.connect(scriptProcessor);
@@ -841,149 +1023,26 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       return;
     }
 
-    // 3. Connect to server WebSocket (/api/live)
+    // 2.5. Wake up / check backend health to handle Cloud Run cold starts smoothly
+    setErrorMessage("সার্ভার জাগ্রত করা হচ্ছে (Cold Start)…");
     try {
-      const wsBase = getBackendWsUrl();
-      const customKey = localStorage.getItem("sajjat_custom_gemini_key") || "";
-      const wsUrl = `${wsBase}/api/live?voice=${encodeURIComponent(
-        selectedVoice
-      )}&lang=${encodeURIComponent(language)}${
-        customKey ? `&key=${encodeURIComponent(customKey)}` : ""
-      }`;
-
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        console.log("WebSocket connected to /api/live");
-        wsRetryCountRef.current = 0; // Reset retry count upon successful connection
-
-        // Start 12-second heartbeat ping packet to prevent Cloud Run scaling down or killing connection on silence
-        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
-        heartbeatIntervalRef.current = setInterval(() => {
-          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            try {
-              wsRef.current.send(JSON.stringify({ type: "ping" }));
-            } catch (err) {
-              console.error("Failed to send heartbeat ping:", err);
-            }
-          }
-        }, 12000);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-
-          if (msg.type === "connected") {
-            setCallStatus("listening");
-            playTone("connect");
-            // Start call duration timer
-            if (callTimerRef.current) clearInterval(callTimerRef.current);
-            callTimerRef.current = setInterval(() => {
-              setCallDuration((prev) => prev + 1);
-            }, 1000);
-          } else if (msg.type === "audio" && msg.data) {
-            playAudioChunk(msg.data);
-          } else if (msg.type === "text" && msg.text) {
-            currentAiSpeechAccumulator.current += msg.text;
-            setLiveTranscript(currentAiSpeechAccumulator.current);
-          } else if (msg.type === "interrupted") {
-            // Barge-in detected by Gemini Live!
-            playTone("interrupt");
-            stopAllAudioPlayback();
-            currentAiSpeechAccumulator.current = "";
-          } else if (msg.type === "turnComplete") {
-            const finalAiText = currentAiSpeechAccumulator.current.trim();
-            if (finalAiText) {
-              const nowTime = new Date().toLocaleTimeString("bn-BD", {
-                hour: "2-digit",
-                minute: "2-digit",
-              });
-              setTranscriptHistory((prev) => [
-                ...prev,
-                {
-                  id: `ai_${Date.now()}`,
-                  role: "assistant",
-                  text: finalAiText,
-                  time: nowTime,
-                },
-              ]);
-              if (onAddExchangeToChat) {
-                onAddExchangeToChat("🎙️ [লাইভ ভয়েস বার্তা]", finalAiText);
-              }
-            }
-            currentAiSpeechAccumulator.current = "";
-          } else if (msg.type === "error") {
-            console.error("Live server error:", msg.error);
-            setErrorMessage(msg.error || "Sajjat AI Live সংযোগে সমস্যা দেখা দিয়েছে।");
-            setCallStatus("error");
-          } else if (msg.type === "closed") {
-            setCallStatus("closed");
-          }
-        } catch (parseErr) {
-          console.error("Error parsing WS message:", parseErr);
-        }
-      };
-
-      ws.onerror = (err) => {
-        console.warn(`WebSocket error (attempt ${wsRetryCountRef.current + 1}/3):`, err);
-      };
-
-      ws.onclose = (event) => {
-        console.log("WebSocket connection closed:", event);
-        if (heartbeatIntervalRef.current) {
-          clearInterval(heartbeatIntervalRef.current);
-          heartbeatIntervalRef.current = null;
-        }
-
-        if (isComponentMounted.current && !isBrowserNativeRef.current && callStatusRef.current !== "closed") {
-          if (wsRetryCountRef.current < 3) {
-            wsRetryCountRef.current += 1;
-            setCallStatus("connecting");
-            setErrorMessage(`সার্ভারের সাথে পুনরায় সংযোগ করা হচ্ছে (চেষ্টা ${wsRetryCountRef.current}/3)…`);
-            setTimeout(() => {
-              if (isComponentMounted.current && !isBrowserNativeRef.current) {
-                startLiveSession();
-              }
-            }, 2500);
-          } else {
-            console.warn("WebSocket reconnection failed after 3 attempts. Falling back to Browser Native Voice...");
-            setErrorMessage("সার্ভারের সাথে সংযোগ ব্যাহত হয়েছে। ব্রাউজার লোকাল ভয়েস চ্যাট চালু করা হচ্ছে...");
-            setTimeout(() => {
-              if (isComponentMounted.current) {
-                startBrowserNativeVoice();
-              }
-            }, 2000);
-          }
-        }
-      };
-    } catch (wsErr: any) {
-      console.warn("WebSocket initialization thrown, retrying or falling back:", wsErr);
-      if (wsRetryCountRef.current < 3) {
-        wsRetryCountRef.current += 1;
-        setCallStatus("connecting");
-        setErrorMessage(`সার্ভারের সাথে পুনরায় সংযোগ করা হচ্ছে (চেষ্টা ${wsRetryCountRef.current}/3)…`);
-        setTimeout(() => {
-          if (isComponentMounted.current) {
-            startLiveSession();
-          }
-        }, 2500);
-      } else {
-        startBrowserNativeVoice();
-      }
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 6000); // 6 seconds wait is safer for cold starts
+      await fetch(`${getBackendBaseUrl()}/api/health`, { signal: controller.signal });
+      clearTimeout(id);
+      setErrorMessage("");
+    } catch (err) {
+      console.warn("Backend warming up or check timed out:", err);
     }
+
+    // 3. Connect to server WebSocket
+    connectWebSocketOnly();
+
   }, [
     cleanupAllAudio,
     isMuted,
-    language,
-    selectedVoice,
-    onAddExchangeToChat,
-    playTone,
-    playAudioChunk,
-    stopAllAudioPlayback,
-    callStatus,
-    startBrowserNativeVoice,
+    connectWebSocketOnly,
+    systemSettings
   ]);
 
   // Toggle Mute / Unmute
@@ -1113,6 +1172,20 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
     <div
       id="live-voice-overlay"
       className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200"
+      onClick={() => {
+        // Resume AudioContexts automatically on any user tap on background to bypass browser autoplay blocks
+        try {
+          const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+          if (inputAudioCtxRef.current && inputAudioCtxRef.current.state === "suspended") {
+            inputAudioCtxRef.current.resume().then(() => console.log("Input AudioContext active"));
+          }
+          if (outputAudioCtxRef.current && outputAudioCtxRef.current.state === "suspended") {
+            outputAudioCtxRef.current.resume().then(() => console.log("Output AudioContext active"));
+          }
+        } catch (err) {
+          console.warn("Failed to resume AudioContexts inside overlay click:", err);
+        }
+      }}
     >
       <div
         id="live-voice-container"
