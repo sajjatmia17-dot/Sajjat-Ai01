@@ -2103,10 +2103,14 @@ server.on("upgrade", (request, socket, head) => {
   try {
     const host = request.headers.host || "localhost";
     const parsedUrl = new URL(request.url || "", `http://${host}`);
-    if (parsedUrl.pathname === "/api/live") {
+    const pathname = parsedUrl.pathname.replace(/\/$/, "");
+    console.log(`[SERVER-UPGRADE] Upgrade request received on host: ${host}, path: ${parsedUrl.pathname} (sanitized: ${pathname})`);
+    if (pathname === "/api/live") {
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit("connection", ws, request);
       });
+    } else {
+      console.log(`[SERVER-UPGRADE] Pathname ${pathname} did not match "/api/live". Upgrade rejected.`);
     }
   } catch (err) {
     console.error("WebSocket upgrade error:", err);

@@ -403,6 +403,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       const currentTime = ctx.currentTime;
       const startTime = Math.max(currentTime, nextStartTimeRef.current);
       source.start(startTime);
+      console.log("AI_AUDIO_PLAYBACK_STARTED"); // EXACT UPPERCASE LOG
       nextStartTimeRef.current = startTime + audioBuffer.duration;
 
       activeSourcesRef.current.push(source);
@@ -735,7 +736,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
 
       ws.onopen = () => {
         console.log("WebSocket connected to /api/live");
-        console.log("[DEBUG] WebSocket opened");
+        console.log("WEBSOCKET_OPEN"); // EXACT UPPERCASE LOG
         wsConnectAttemptsRef.current = 0; // reset attempts
         setErrorMessage("");
         setCallStatus("listening");
@@ -761,15 +762,14 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       };
 
       ws.onmessage = (event) => {
-        console.log("[DEBUG] WebSocket message received");
         try {
           const msg = JSON.parse(event.data);
 
           if (msg.type === "connected") {
-            console.log("[DEBUG] Live API response received (connected)");
+            console.log("LIVE_API_CONNECTED"); // EXACT UPPERCASE LOG
             setCallStatus("listening");
           } else if (msg.type === "audio" && msg.data) {
-            console.log(`[DEBUG] AI audio received (size: ${msg.data.length})`);
+            console.log(`LIVE_API_AUDIO_RECEIVED (size: ${msg.data.length})`); // EXACT UPPERCASE LOG
             playAudioChunk(msg.data);
           } else if (msg.type === "text" && msg.text) {
             currentAiSpeechAccumulator.current += msg.text;
@@ -801,7 +801,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
             currentAiSpeechAccumulator.current = "";
           } else if (msg.type === "error") {
             console.error("Live server error:", msg.error);
-            console.log(`[DEBUG] Live API error: ${msg.error}`);
+            console.log("LIVE_API_ERROR: " + msg.error); // EXACT UPPERCASE LOG
             setErrorMessage(msg.error || "Sajjat AI Live সংযোগে সমস্যা দেখা দিয়েছে।");
             setCallStatus("error");
           } else if (msg.type === "closed") {
@@ -813,7 +813,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
       };
 
       ws.onerror = (err) => {
-        console.log("[DEBUG] WebSocket error:", err);
+        console.log("WEBSOCKET_ERROR", err); // EXACT UPPERCASE LOG
         console.warn(`WebSocket error:`, err);
       };
 
@@ -824,7 +824,8 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
           heartbeatIntervalRef.current = null;
         }
 
-        if (isComponentMounted.current && !isBrowserNativeRef.current && callStatusRef.current !== "closed") {
+        // Avoid retrying if status is error or closed
+        if (isComponentMounted.current && !isBrowserNativeRef.current && callStatusRef.current !== "closed" && callStatusRef.current !== "error") {
           if (wsConnectAttemptsRef.current < 5) {
             wsConnectAttemptsRef.current += 1;
             setCallStatus("connecting");
@@ -904,7 +905,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
         video: false,
       });
       micStreamRef.current = stream;
-      console.log("[DEBUG] microphone started");
+      console.log("MIC_STREAM_STARTED"); // EXACT UPPERCASE LOG
     } catch (permErr: any) {
       console.error("Microphone permission denied:", permErr);
       setErrorMessage(
@@ -1000,8 +1001,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
         const pcm16 = downsampleTo16kHz(boostedBuffer, inputCtx.sampleRate);
         const base64Audio = int16ToBase64(pcm16);
 
-        // ADD LOG: microphone audio chunk created
-        console.log(`[DEBUG] microphone audio chunk created (size: ${base64Audio.length})`);
+        console.log(`AUDIO_CHUNK_CREATED (size: ${base64Audio.length})`); // EXACT UPPERCASE LOG
 
         wsRef.current.send(
           JSON.stringify({
@@ -1010,8 +1010,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
           })
         );
 
-        // ADD LOG: audio chunk sent
-        console.log("[DEBUG] audio chunk sent");
+        console.log("AUDIO_CHUNK_SENT"); // EXACT UPPERCASE LOG
       };
 
       source.connect(scriptProcessor);
