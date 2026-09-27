@@ -53,7 +53,23 @@ export const Header: React.FC<HeaderProps> = ({
   const [tapCount, setTapCount] = useState(0);
   const tapTimeoutRef = useRef<any>(null);
 
-  const requiredTaps = typeof systemSettings?.adminTapCount === "number" ? systemSettings.adminTapCount : 7;
+  const getRequiredTaps = (): number => {
+    if (typeof systemSettings?.adminTapCount === "number" && systemSettings.adminTapCount > 0) {
+      return systemSettings.adminTapCount;
+    }
+    try {
+      const cached = typeof window !== "undefined" ? localStorage.getItem("sajjat_ai_system_settings") : null;
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (typeof parsed?.adminTapCount === "number" && parsed.adminTapCount > 0) {
+          return parsed.adminTapCount;
+        }
+      }
+    } catch (e) {}
+    return 7;
+  };
+
+  const requiredTaps = getRequiredTaps();
 
   // Secret Tap Trigger for Admin Access
   const handleLogoTap = () => {

@@ -6,13 +6,17 @@ import { ref, get } from "firebase/database";
 export function getBackendBaseUrl(): string {
   if (typeof window === "undefined") return "";
 
-  // 1. Explicit VITE_BACKEND_URL or VITE_APP_URL has the highest priority (safeguarded against Netlify auto-injection)
-  let envUrl = (import.meta as any).env?.VITE_BACKEND_URL || (import.meta as any).env?.VITE_APP_URL;
-  if (envUrl && !envUrl.includes("netlify.app")) {
+  // 1. Explicit VITE_BACKEND_URL has the absolute highest priority
+  let envUrl = (import.meta as any).env?.VITE_BACKEND_URL;
+  if (envUrl && typeof envUrl === "string" && envUrl.trim().length > 0) {
+    envUrl = envUrl.trim();
     if (envUrl.endsWith("/")) {
       envUrl = envUrl.slice(0, -1);
     }
-    return envUrl;
+    // Ensure we are not pointing backend to a netlify app or back to the frontend host itself
+    if (!envUrl.includes("netlify.app") && !envUrl.includes(window.location.hostname)) {
+      return envUrl;
+    }
   }
 
   // 2. Auto-detect local development or Google AI Studio preview
@@ -29,7 +33,7 @@ export function getBackendBaseUrl(): string {
     return origin;
   }
 
-  // 3. Fallback to the production Cloud Run URL
+  // 3. Fallback to the production Cloud Run URL (Static host / Netlify production environment)
   return "https://ais-pre-muefpa2tovs5je5tgghvb7-797513251199.asia-southeast1.run.app";
 }
 

@@ -1,7 +1,5 @@
 import React, { useState, useEffect } from "react";
 import { 
-  Mic, 
-  PhoneCall, 
   Image as ImageIcon, 
   Sparkles, 
   FileUp, 
@@ -10,7 +8,6 @@ import {
   Save, 
   AlertCircle, 
   Zap, 
-  Volume2, 
   Radio, 
   RefreshCw, 
   Play, 
@@ -193,124 +190,7 @@ export const AdminVoiceAndFiles: React.FC = () => {
         </button>
       </div>
 
-      {/* SECTION 1: LIVE VOICE CHAT CONTROL */}
-      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-sm space-y-5">
-        <div className="flex items-center justify-between pb-4 border-b border-slate-800">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 flex items-center justify-center font-bold">
-              <PhoneCall className="w-5 h-5" />
-            </div>
-            <div>
-              <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
-                লাইভ ভয়েস চ্যাট নিয়ন্ত্রণ (Live Voice Chat Call Feature)
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 font-normal">
-                  কল বাটন
-                </span>
-              </h3>
-              <p className="text-xs text-slate-400">
-                মেসেজ ইনপুটের পাশে কল বাটনের মতো অপশন যার মাধ্যমে ব্যবহারকারী Ai-এর সাথে সরাসরি কথা বলে।
-              </p>
-            </div>
-          </div>
 
-          <div className="flex items-center gap-3">
-            <span className={`text-xs font-bold ${settings.liveVoiceEnabled !== false ? "text-emerald-400" : "text-rose-400"}`}>
-              {settings.liveVoiceEnabled !== false ? "চালু (ACTIVE)" : "বন্ধ (DISABLED)"}
-            </span>
-            <button
-              type="button"
-              onClick={() => handleToggle("liveVoiceEnabled")}
-              className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors cursor-pointer ${
-                settings.liveVoiceEnabled !== false ? "bg-emerald-500" : "bg-slate-800 border border-slate-700"
-              }`}
-            >
-              <span
-                className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform shadow-md ${
-                  settings.liveVoiceEnabled !== false ? "translate-x-6" : "translate-x-1"
-                }`}
-              />
-            </button>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* Voice Persona Selection */}
-          <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
-            <label className="block text-xs font-semibold text-slate-200 flex items-center gap-1.5">
-              <Volume2 className="w-3.5 h-3.5 text-indigo-400" />
-              Ai-এর লাইভ ভয়েস বদলান (Voice Persona)
-            </label>
-            <select
-              value={settings.liveVoiceName || "Zephyr"}
-              onChange={(e) => setSettings((prev) => ({ ...prev, liveVoiceName: e.target.value }))}
-              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs font-semibold text-white focus:outline-none focus:border-cyan-500"
-            >
-              {VOICE_PERSONAS.map((vp) => (
-                <option key={vp.id} value={vp.id}>
-                  {vp.name} — {vp.desc}
-                </option>
-              ))}
-            </select>
-            <p className="text-[11px] text-slate-400 mt-1">
-              নির্বাচিত ভয়েসে Ai ব্যবহারকারীর সাথে বাংলা ও ইংরেজিতে কথা বলবে।
-            </p>
-          </div>
-
-          {/* Voice Speech Speed */}
-          <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
-            <label className="block text-xs font-semibold text-slate-200 flex items-center gap-1.5">
-              <Radio className="w-3.5 h-3.5 text-cyan-400" />
-              কথা বলার গতি (Speaking Tempo)
-            </label>
-            <select
-              value={settings.liveVoiceSpeed || "1.0"}
-              onChange={(e) => setSettings((prev) => ({ ...prev, liveVoiceSpeed: e.target.value }))}
-              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs font-semibold text-white focus:outline-none focus:border-cyan-500"
-            >
-              <option value="0.8">ধীর ও গম্ভীর (0.8x Slow)</option>
-              <option value="0.9">মৃদু ধীর (0.9x Relaxed)</option>
-              <option value="1.0">স্বাভাবিক ও পরিষ্কার (1.0x Normal)</option>
-              <option value="1.1">উচ্ছ্বসিত ও সপ্রতিভ (1.1x Energetic)</option>
-              <option value="1.2">দ্রুত (1.2x Fast)</option>
-            </select>
-            <p className="text-[11px] text-slate-400 mt-1">
-              ব্যবহারকারীর সাথে কথা বলার সময় কণ্ঠের টেম্পো ও ন্যাচারাল স্পিড।
-            </p>
-          </div>
-
-          {/* Maintenance Notice Message */}
-          <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2 md:col-span-2">
-            <label className="block text-xs font-semibold text-slate-200 flex items-center gap-1.5">
-              <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
-              লাইভ ভয়েস বন্ধ থাকাকালীন ইউজার নোটিশ বার্তা (Disabled Notice)
-            </label>
-            <input
-              type="text"
-              value={settings.liveVoiceNotice || ""}
-              onChange={(e) => setSettings((prev) => ({ ...prev, liveVoiceNotice: e.target.value }))}
-              placeholder="লাইভ ভয়েস চ্যাট সাময়িকভাবে রক্ষণাবেক্ষণের জন্য বন্ধ রয়েছে।"
-              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white focus:outline-none focus:border-cyan-500"
-            />
-            <p className="text-[11px] text-slate-500">
-              অ্যাডমিন থেকে ফিচার বন্ধ থাকলে ইউজার কলে চাপ দিলে এই বার্তাটি দেখতে পাবে।
-            </p>
-          </div>
-
-          {/* Custom Voice Instruction */}
-          <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2 md:col-span-2">
-            <label className="block text-xs font-semibold text-slate-200">
-              কাস্টম লাইভ ভয়েস নির্দেশনা (Live Voice System Instructions)
-            </label>
-            <textarea
-              rows={2}
-              value={settings.liveVoiceInstruction || ""}
-              onChange={(e) => setSettings((prev) => ({ ...prev, liveVoiceInstruction: e.target.value }))}
-              placeholder="যেমন: কথা বলার সময় মিষ্টি ও আন্তরিক আচরণ বজায় রাখবে এবং বাংলা ব্যাকরণ নির্ভুল রাখবে..."
-              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white focus:outline-none focus:border-cyan-500 resize-none"
-            />
-          </div>
-        </div>
-      </div>
 
       {/* SECTION 2: AI IMAGE GENERATOR STUDIO CONTROL */}
       <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-sm space-y-5">

@@ -2,15 +2,12 @@ import React, { useState, useRef, useEffect } from "react";
 import { 
   Send, 
   Paperclip, 
-  Mic, 
-  MicOff, 
   Image as ImageIcon, 
   FileText, 
   FileCode, 
   X,
   Sparkles,
-  Palette,
-  PhoneCall
+  Palette
 } from "lucide-react";
 import { AttachedFile, SystemSettingsConfig } from "../types";
 
@@ -18,7 +15,6 @@ interface ChatInputProps {
   onSendMessage: (text: string, attachedFile?: AttachedFile) => void;
   isLoading: boolean;
   onOpenImageGenerator?: () => void;
-  onOpenLiveVoice?: () => void;
   systemSettings?: SystemSettingsConfig | null;
 }
 
@@ -26,16 +22,13 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   onSendMessage,
   isLoading,
   onOpenImageGenerator,
-  onOpenLiveVoice,
   systemSettings,
 }) => {
   const [text, setText] = useState("");
   const [attachedFile, setAttachedFile] = useState<AttachedFile | null>(null);
-  const [isListening, setIsListening] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
-  const recognitionRef = useRef<any>(null);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -47,55 +40,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       )}px`;
     }
   }, [text]);
-
-  // Setup speech recognition
-  useEffect(() => {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-
-    if (SpeechRecognition) {
-      const recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = false;
-      recognition.lang = "bn-BD";
-
-      recognition.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript;
-        setText((prev) => (prev ? `${prev} ${transcript}` : transcript));
-        setIsListening(false);
-      };
-
-      recognition.onerror = () => {
-        setIsListening(false);
-      };
-
-      recognition.onend = () => {
-        setIsListening(false);
-      };
-
-      recognitionRef.current = recognition;
-    }
-  }, []);
-
-  const toggleVoiceInput = () => {
-    if (!recognitionRef.current) {
-      alert("আপনার ব্রাউজারে ভয়েস ইনপুট সমর্থিত নয়। দয়া করে Chrome বা Edge ব্যবহার করুন।");
-      return;
-    }
-
-    if (isListening) {
-      recognitionRef.current.stop();
-      setIsListening(false);
-    } else {
-      try {
-        recognitionRef.current.start();
-        setIsListening(true);
-      } catch (err) {
-        console.error("Voice start error:", err);
-        setIsListening(false);
-      }
-    }
-  };
 
   // Image Upload
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -295,46 +239,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             <Sparkles className={`w-4.5 h-4.5 ${systemSettings?.imageGenerationEnabled === false ? "text-slate-600" : "text-purple-400"}`} />
           </button>
 
-          {/* Live AI Voice Call */}
-          {onOpenLiveVoice && (
-            <button
-              type="button"
-              onClick={() => {
-                if (systemSettings?.liveVoiceEnabled === false) {
-                  alert(systemSettings.liveVoiceNotice || "লাইভ ভয়েস চ্যাট সাময়িকভাবে অ্যাডমিন দ্বারা বন্ধ রয়েছে।");
-                  return;
-                }
-                onOpenLiveVoice();
-              }}
-              className={`p-2 rounded-xl transition-all shrink-0 shadow-xs cursor-pointer active:scale-95 border ${
-                systemSettings?.liveVoiceEnabled === false
-                  ? "text-slate-600 border-slate-800 opacity-60 cursor-not-allowed"
-                  : "text-cyan-400 hover:text-cyan-300 hover:bg-cyan-500/15 border-cyan-500/20"
-              }`}
-              title={
-                systemSettings?.liveVoiceEnabled === false
-                  ? "লাইভ ভয়েস চ্যাট সাময়িকভাবে বন্ধ রয়েছে"
-                  : `${systemSettings?.aiBrandName || "Sajjat AI"}-এর সাথে সরাসরি লাইভ ভয়েস চ্যাট / কল করুন`
-              }
-            >
-              <PhoneCall className="w-4.5 h-4.5" />
-            </button>
-          )}
-
-          {/* Voice Input */}
-          <button
-            type="button"
-            onClick={toggleVoiceInput}
-            className={`p-2 rounded-xl transition-all shrink-0 ${
-              isListening
-                ? "bg-rose-500/20 text-rose-400 border border-rose-500/40 animate-pulse"
-                : "text-slate-400 hover:text-indigo-400 hover:bg-slate-800/80"
-            }`}
-            title={isListening ? "ভয়েস রেকর্ডিং বন্ধ করুন" : "মুখে বলে প্রশ্ন করুন"}
-          >
-            {isListening ? <MicOff className="w-4.5 h-4.5" /> : <Mic className="w-4.5 h-4.5" />}
-          </button>
-
           {/* Main textarea */}
           <textarea
             ref={textareaRef}
@@ -342,9 +246,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             onChange={(e) => setText(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={
-              isListening
-                ? `কথা বলুন... ${systemSettings?.aiBrandName || "Sajjat AI"} শুনছে...`
-                : attachedFile
+              attachedFile
                 ? "সংযুক্ত ফাইল সম্পর্কে লিখুন..."
                 : `${systemSettings?.aiBrandName || "Sajjat AI"}-কে যেকোনো প্রশ্ন করুন...`
             }

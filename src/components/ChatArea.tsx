@@ -5,11 +5,6 @@ import {
   User as UserIcon, 
   Copy, 
   Check, 
-  Volume2, 
-  VolumeX, 
-  Play,
-  Pause,
-  Square,
   Code, 
   GraduationCap, 
   BrainCircuit, 
@@ -27,7 +22,6 @@ import {
   Star
 } from "lucide-react";
 import { ChatMessage, UserProfile, ModalType, GeminiModelId, AVAILABLE_MODELS, SystemSettingsConfig } from "../types";
-import { playAiVoice, stopAiVoice, pauseAiVoice, resumeAiVoice } from "../utils/audioPlayer";
 import { GeneratedImageCard } from "./GeneratedImageCard";
 
 const THEME_GRADIENTS: Record<string, string> = {
@@ -180,9 +174,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [speakingId, setSpeakingId] = useState<string | null>(null);
-  const [isPaused, setIsPaused] = useState(false);
-  const [voiceErrorMsg, setVoiceErrorMsg] = useState<string | null>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
 
   const brandName = systemSettings?.aiBrandName || "Sajjat AI";
@@ -215,13 +206,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
-  // Clean up audio on unmount
-  useEffect(() => {
-    return () => {
-      stopAiVoice();
-    };
-  }, []);
-
   const handleScroll = () => {
     if (!scrollContainerRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
@@ -238,46 +222,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const handleSpeak = (id: string, text: string) => {
-    if (speakingId === id) {
-      if (isPaused) {
-        resumeAiVoice();
-        setIsPaused(false);
-      } else {
-        pauseAiVoice();
-        setIsPaused(true);
-      }
-      return;
-    }
 
-    stopAiVoice();
-    setSpeakingId(id);
-    setIsPaused(false);
-    setVoiceErrorMsg(null);
-
-    playAiVoice(text, {
-      onStart: () => {
-        setSpeakingId(id);
-        setIsPaused(false);
-      },
-      onEnd: () => {
-        setSpeakingId((curr) => (curr === id ? null : curr));
-        setIsPaused(false);
-      },
-      onError: (errText) => {
-        setSpeakingId((curr) => (curr === id ? null : curr));
-        setIsPaused(false);
-        setVoiceErrorMsg(errText || "এই browser-এ Voice সুবিধাটি বর্তমানে available নয়।");
-        setTimeout(() => setVoiceErrorMsg(null), 4000);
-      },
-    });
-  };
-
-  const handleStopSpeak = () => {
-    stopAiVoice();
-    setSpeakingId(null);
-    setIsPaused(false);
-  };
 
   const suggestionChips = [
     {
@@ -418,7 +363,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <div className="max-w-3xl mx-auto space-y-5">
             {messages.map((msg, idx) => {
               const isUser = msg.sender === "user";
-              const isSpeaking = speakingId === msg.id;
               const isCopied = copiedId === msg.id;
 
               return (
@@ -540,69 +484,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         )}
                       </button>
 
-                      {/* Read Aloud TTS controls (Bot only) */}
-                      {!isUser && (
-                        <div className="flex items-center gap-1">
-                          {isSpeaking ? (
-                            <div className="flex items-center gap-1 bg-indigo-950/60 border border-indigo-500/30 rounded-lg p-0.5 shadow-xs">
-                              {/* Animated Equalizer */}
-                              <div className="flex items-end gap-0.5 h-3 px-1">
-                                <span className={`w-0.5 bg-indigo-400 ${isPaused ? "h-1.5 opacity-50" : "h-1.5 animate-bounce"}`}></span>
-                                <span className={`w-0.5 bg-cyan-400 ${isPaused ? "h-2.5 opacity-50" : "h-3 animate-bounce delay-100"}`}></span>
-                                <span className={`w-0.5 bg-purple-400 ${isPaused ? "h-2 opacity-50" : "h-2 animate-bounce delay-200"}`}></span>
-                              </div>
 
-                              {/* Pause / Resume Button */}
-                              <button
-                                type="button"
-                                onClick={() => handleSpeak(msg.id, msg.text)}
-                                className="p-1 rounded-md text-indigo-300 hover:text-white hover:bg-indigo-800/50 transition-colors text-xs flex items-center gap-1 cursor-pointer"
-                                title={isPaused ? "▶ পুনরায় শুনুন (Resume)" : "⏸ পজ করুন (Pause)"}
-                              >
-                                {isPaused ? (
-                                  <>
-                                    <Play className="w-3 h-3 text-cyan-400 fill-cyan-400" />
-                                    <span className="text-[10px] text-cyan-300 font-medium">চালু</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Pause className="w-3 h-3 text-indigo-300 fill-indigo-300" />
-                                    <span className="text-[10px] text-indigo-200 font-medium">পজ</span>
-                                  </>
-                                )}
-                              </button>
-
-                              {/* Stop Button */}
-                              <button
-                                type="button"
-                                onClick={handleStopSpeak}
-                                className="p-1 rounded-md text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors text-xs flex items-center gap-1 cursor-pointer"
-                                title="⏹ কথা থামান (Stop)"
-                              >
-                                <Square className="w-3 h-3 text-rose-400 fill-rose-400" />
-                                <span className="text-[10px] text-rose-300 font-medium">থামান</span>
-                              </button>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleSpeak(msg.id, msg.text)}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/80 transition-colors text-xs flex items-center gap-1.5 cursor-pointer"
-                              title="🔊 Sajjat AI এর কন্ঠে শুনুন (Read Aloud)"
-                            >
-                              <Volume2 className="w-3.5 h-3.5 text-slate-400 group-hover:text-white" />
-                              <span className="text-[10px]">শুনুন</span>
-                            </button>
-                          )}
-
-                          {/* Error Message Toast */}
-                          {voiceErrorMsg && speakingId === msg.id && (
-                            <span className="text-[10px] text-rose-400 bg-rose-950/80 border border-rose-800/80 px-2 py-0.5 rounded-md font-medium">
-                              {voiceErrorMsg}
-                            </span>
-                          )}
-                        </div>
-                      )}
 
                       {/* Delete this single message */}
                       {onDeleteMessage && (

@@ -16,7 +16,6 @@ import { NotificationsModal } from "./components/NotificationsModal";
 import { BookViewerModal } from "./components/BookViewerModal";
 import { ImageGeneratorModal } from "./components/ImageGeneratorModal";
 import { HtmlViewerModal } from "./components/HtmlViewerModal";
-import { LiveVoiceModal } from "./components/LiveVoiceModal";
 import { 
   UserProfile, 
   ChatSession, 
@@ -597,55 +596,6 @@ export default function App() {
     }
   };
 
-  // Add voice exchange from Live Voice call into the chat session
-  const handleAddExchangeToChat = useCallback((userText: string, aiReply: string) => {
-    let currentSessionId = activeSessionId;
-    let targetSession = sessions.find((s) => s.id === currentSessionId);
-    if (!targetSession) {
-      currentSessionId = `session_${Date.now()}`;
-      targetSession = {
-        id: currentSessionId,
-        title: userText ? (userText.length > 25 ? userText.substring(0, 25) + "..." : userText) : "ভয়েস চ্যাট",
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        messages: [],
-      };
-      setActiveSessionId(currentSessionId);
-    }
-    const uMsg: ChatMessage = {
-      id: `voice_u_${Date.now()}`,
-      sender: "user",
-      text: userText,
-      timestamp: Date.now(),
-      status: "sent"
-    };
-    const bMsg: ChatMessage = {
-      id: `voice_b_${Date.now()}`,
-      sender: "bot",
-      text: aiReply,
-      timestamp: Date.now() + 50,
-      status: "sent",
-      model: selectedModel
-    };
-    setSessions((prev) => {
-      const exists = prev.some((s) => s.id === currentSessionId);
-      const updated = exists
-        ? prev.map((s) =>
-            s.id === currentSessionId
-              ? { ...s, messages: [...s.messages, uMsg, bMsg], updatedAt: Date.now() }
-              : s
-          )
-        : [{ ...targetSession!, messages: [uMsg, bMsg] }, ...prev];
-      if (user?.uid) {
-        const toSave = updated.find((s) => s.id === currentSessionId);
-        if (toSave) saveUserChatSession(user.uid, toSave);
-      } else {
-        safeSaveGuestSessions(updated);
-      }
-      return updated;
-    });
-  }, [activeSessionId, sessions, selectedModel, user?.uid]);
-
   const handleRetry = () => {
     if (lastUserMessage) {
       handleSendMessage(lastUserMessage.text, lastUserMessage.attachedFile);
@@ -742,7 +692,6 @@ export default function App() {
             onSendMessage={handleSendMessage}
             isLoading={isLoading}
             onOpenImageGenerator={() => setModalType("image_generator")}
-            onOpenLiveVoice={() => setModalType("live_voice")}
             systemSettings={systemSettings}
           />
         </main>
@@ -773,15 +722,6 @@ export default function App() {
       <HtmlViewerModal
         isOpen={modalType === "html_viewer"}
         onClose={() => setModalType("none")}
-      />
-
-      {/* 🎙️ Live Voice Assistant / Call with Sajjat AI */}
-      <LiveVoiceModal
-        isOpen={modalType === "live_voice"}
-        onClose={() => setModalType("none")}
-        user={user}
-        onAddExchangeToChat={handleAddExchangeToChat}
-        systemSettings={systemSettings}
       />
 
       {/* Notifications Modal */}

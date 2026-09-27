@@ -3,7 +3,6 @@ import {
   Sliders, 
   Sparkles, 
   ImageIcon, 
-  PhoneCall, 
   FileUp, 
   Radio, 
   Volume2, 
@@ -128,14 +127,7 @@ export const AdminFeatureControl: React.FC = () => {
       color: "cyan",
       activeBg: "bg-cyan-600"
     },
-    {
-      key: "liveVoiceEnabled" as keyof SystemSettingsConfig,
-      label: "🎙️ লাইভ ভয়েস (Live Voice Call)",
-      desc: "সরাসরি রিয়েল-টাইমে ভয়েস কল এবং কথা বলার সুবিধা।",
-      icon: PhoneCall,
-      color: "emerald",
-      activeBg: "bg-emerald-600"
-    },
+
     {
       key: "fileUploadEnabled" as keyof SystemSettingsConfig,
       label: "📎 ফাইল আপলোড (File Attachments)",

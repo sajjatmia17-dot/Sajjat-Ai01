@@ -248,15 +248,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     const unsub = subscribeToSystemSettings((settings) => {
       if (settings) {
         setSystemSettings(settings);
-        if (typeof settings.adminTapCount === "number") {
+        if (typeof settings.adminTapCount === "number" && settings.adminTapCount > 0) {
           setAdminTapCount(settings.adminTapCount);
-        } else {
-          setAdminTapCount(7);
         }
-        if (settings.adminPassword) {
+        if (typeof settings.adminPassword === "string") {
           setAdminPassword(settings.adminPassword);
-        } else {
-          setAdminPassword("");
         }
       }
     });
@@ -269,27 +265,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setSecuritySaveSuccess(false);
     try {
       const payload = {
-        adminTapCount,
+        adminTapCount: Number(adminTapCount) || 7,
         adminPassword: adminPassword.trim(),
       };
 
       await saveSystemSettings(payload);
 
-      // Sync to server in-memory settings
-      try {
-        await fetch(`${getBackendBaseUrl()}/api/system-settings`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-      } catch (err) {
-        console.warn("Server system-settings sync failed:", err);
-      }
-
       setSecuritySaveSuccess(true);
-      setTimeout(() => setSecuritySaveSuccess(false), 3000);
+      setTimeout(() => setSecuritySaveSuccess(false), 3500);
     } catch (err: any) {
-      alert("নিরাপত্তা সেটিংস সংরক্ষণে ত্রুটি: " + err.message);
+      console.error("Save security settings error:", err);
+      alert("নিরাপত্তা সেটিংস সংরক্ষণে ত্রুটি: " + (err?.message || "অজানা ত্রুটি"));
     } finally {
       setIsSavingSecurity(false);
     }

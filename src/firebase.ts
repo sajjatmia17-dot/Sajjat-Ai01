@@ -307,11 +307,13 @@ const ADMIN_MASTER_PASSKEYS = [
   "sajjatai"
 ];
 
-export async function loginAdminWithMasterKey(key: string): Promise<UserProfile> {
-  const normalizedKey = key.trim().toLowerCase();
-  const isMasterKeyMatch = ADMIN_MASTER_PASSKEYS.some((k) => k.toLowerCase() === normalizedKey);
-  if (!isMasterKeyMatch) {
-    throw new Error("ভুল অ্যাডমিন সিক্রেট পিন বা মাস্টার পাসকি। সঠিক কোড দিন।");
+export async function loginAdminWithMasterKey(key: string, skipKeyCheck: boolean = false): Promise<UserProfile> {
+  if (!skipKeyCheck) {
+    const normalizedKey = key.trim().toLowerCase();
+    const isMasterKeyMatch = ADMIN_MASTER_PASSKEYS.some((k) => k.toLowerCase() === normalizedKey);
+    if (!isMasterKeyMatch) {
+      throw new Error("ভুল অ্যাডমিন সিক্রেট পিন বা মাস্টার পাসকি। সঠিক কোড দিন।");
+    }
   }
 
   // Master key is verified for sajjatmia17@gmail.com
@@ -347,30 +349,73 @@ export async function loginAdmin(email: string, pass: string): Promise<UserProfi
     throw new Error("পাসওয়ার্ড দেওয়া আবশ্যক। অনুগ্রহ করে সঠিক পাসওয়ার্ড বা সিক্রেট পিন দিন।");
   }
 
-  // 1. Check dynamic password from Realtime Database first if set
-  try {
-    const settingsRef = ref(database, "system_settings");
-    const snapshot = await get(settingsRef);
-    if (snapshot.exists()) {
-      const settings = snapshot.val();
-      if (settings.adminPassword && settings.adminPassword.trim()) {
-        const dbAdminPassword = settings.adminPassword.trim();
-        if (trimmedPass === dbAdminPassword) {
-          return await loginAdminWithMasterKey(trimmedPass);
-        }
-      }
-    }
-  } catch (err) {
-    console.warn("Could not check dynamic admin password from RTDB:", err);
+  // Retrieve dynamic admin password from all possible sources (memory, local storage, server API, RTDB)
+  let savedAdminPassword = "";
+
+  // Source 1: In-Memory cache
+  if (currentSystemSettingsInMemory?.adminPassword && typeof currentSystemSettingsInMemory.adminPassword === "string" && currentSystemSettingsInMemory.adminPassword.trim() !== "") {
+    savedAdminPassword = currentSystemSettingsInMemory.adminPassword.trim();
   }
 
-  // 2. Check if provided pass matches any Master Admin Passkey / PIN
+  // Source 2: LocalStorage cache
+  if (!savedAdminPassword) {
+    try {
+      const cached = typeof window !== "undefined" ? localStorage.getItem("sajjat_ai_system_settings") : null;
+      if (cached) {
+        const settings = JSON.parse(cached);
+        if (settings?.adminPassword && typeof settings.adminPassword === "string" && settings.adminPassword.trim() !== "") {
+          savedAdminPassword = settings.adminPassword.trim();
+        }
+      }
+    } catch (e) {}
+  }
+
+  // Source 3: Server API Endpoint
+  if (!savedAdminPassword) {
+    try {
+      const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+      const res = await fetch(`${baseUrl}/api/system-settings`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.adminPassword && typeof data.adminPassword === "string" && data.adminPassword.trim() !== "") {
+          savedAdminPassword = data.adminPassword.trim();
+        }
+      }
+    } catch (e) {}
+  }
+
+  // Source 4: Firebase Realtime Database
+  if (!savedAdminPassword) {
+    try {
+      const settingsRef = ref(database, "system_settings");
+      const snapshot = await get(settingsRef);
+      if (snapshot.exists()) {
+        const settings = snapshot.val();
+        if (settings?.adminPassword && typeof settings.adminPassword === "string" && settings.adminPassword.trim() !== "") {
+          savedAdminPassword = settings.adminPassword.trim();
+        }
+      }
+    } catch (err) {
+      console.warn("Could not check dynamic admin password from RTDB:", err);
+    }
+  }
+
+  // IF a custom savedAdminPassword is set by Admin:
+  if (savedAdminPassword) {
+    if (trimmedPass === savedAdminPassword) {
+      return await loginAdminWithMasterKey(trimmedPass, true);
+    } else {
+      throw new Error("ভুল পাসওয়ার্ড দেওয়া হয়েছে! আপনি অ্যাডমিন সেটিংসে যে নতুন পাসওয়ার্ড সেট করেছেন সেটি প্রবেশ করান।");
+    }
+  }
+
+  // IF NO custom savedAdminPassword is set, check default master passkeys/PINs
   const isMasterKey = ADMIN_MASTER_PASSKEYS.some((k) => k.toLowerCase() === trimmedPass.toLowerCase());
   if (isMasterKey) {
     return await loginAdminWithMasterKey(trimmedPass);
   }
 
-  // 2. Check if current authenticated user is already admin
+  // Check if current authenticated user is already admin
   if (auth.currentUser && auth.currentUser.email?.toLowerCase() === normalizedEmail) {
     const existing = await loginAdminWithCurrentSession();
     if (existing) return existing;
@@ -1067,26 +1112,107 @@ export const DEFAULT_SYSTEM_SETTINGS: SystemSettingsConfig = {
   updatedAt: new Date().toISOString()
 };
 
+// System Settings pub-sub & in-memory cache
+const systemSettingsListeners = new Set<(settings: SystemSettingsConfig) => void>();
+let currentSystemSettingsInMemory: SystemSettingsConfig = { ...DEFAULT_SYSTEM_SETTINGS };
+
+// Synchronously initialize in-memory state from localStorage if available
+try {
+  const cached = typeof window !== "undefined" ? localStorage.getItem("sajjat_ai_system_settings") : null;
+  if (cached) {
+    const parsed = JSON.parse(cached);
+    currentSystemSettingsInMemory = { ...DEFAULT_SYSTEM_SETTINGS, ...parsed };
+  }
+} catch (e) {}
+
 export function subscribeToSystemSettings(onUpdate: (settings: SystemSettingsConfig) => void) {
+  systemSettingsListeners.add(onUpdate);
+
+  // 1. Immediately emit current in-memory / cached settings
+  onUpdate(currentSystemSettingsInMemory);
+
+  // 2. Hydrate from Express server backend
+  try {
+    const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+    fetch(`${baseUrl}/api/system-settings`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((serverData) => {
+        if (serverData && typeof serverData === "object" && Object.keys(serverData).length > 0) {
+          currentSystemSettingsInMemory = { ...currentSystemSettingsInMemory, ...serverData };
+          try {
+            localStorage.setItem("sajjat_ai_system_settings", JSON.stringify(currentSystemSettingsInMemory));
+          } catch (e) {}
+          systemSettingsListeners.forEach((fn) => fn(currentSystemSettingsInMemory));
+        }
+      })
+      .catch((err) => console.warn("Server system-settings hydrate skipped:", err));
+  } catch (e) {}
+
+  // 3. Listen to Firebase Realtime Database
   const settingsRef = ref(database, "system_settings");
-  return onValue(settingsRef, (snapshot) => {
-    if (snapshot.exists()) {
-      onUpdate({ ...DEFAULT_SYSTEM_SETTINGS, ...snapshot.val() });
-    } else {
-      onUpdate(DEFAULT_SYSTEM_SETTINGS);
+  const unsubscribeRtdb = onValue(
+    settingsRef,
+    (snapshot) => {
+      if (snapshot.exists()) {
+        const val = snapshot.val();
+        if (val && typeof val === "object") {
+          currentSystemSettingsInMemory = { ...currentSystemSettingsInMemory, ...val };
+          try {
+            localStorage.setItem("sajjat_ai_system_settings", JSON.stringify(currentSystemSettingsInMemory));
+          } catch (e) {}
+          systemSettingsListeners.forEach((fn) => fn(currentSystemSettingsInMemory));
+        }
+      }
+    },
+    (err) => {
+      console.warn("RTDB system settings warning:", err);
+      // DO NOT overwrite memory or localStorage on RTDB warning!
     }
-  }, (err) => {
-    console.warn("System settings subscription error:", err);
-    onUpdate(DEFAULT_SYSTEM_SETTINGS);
-  });
+  );
+
+  return () => {
+    systemSettingsListeners.delete(onUpdate);
+    unsubscribeRtdb();
+  };
 }
 
 export async function saveSystemSettings(settings: Partial<SystemSettingsConfig>): Promise<void> {
-  const settingsRef = ref(database, "system_settings");
-  await update(settingsRef, {
+  const updatedSettings: SystemSettingsConfig = {
+    ...currentSystemSettingsInMemory,
     ...settings,
-    updatedAt: new Date().toISOString()
-  });
+    updatedAt: new Date().toISOString(),
+  };
+
+  // 1. Update in-memory state
+  currentSystemSettingsInMemory = updatedSettings;
+
+  // 2. Update localStorage cache IMMEDIATELY
+  try {
+    localStorage.setItem("sajjat_ai_system_settings", JSON.stringify(updatedSettings));
+  } catch (e) {}
+
+  // 3. Notify all active listeners in UI IMMEDIATELY
+  systemSettingsListeners.forEach((fn) => fn(updatedSettings));
+
+  // 4. Sync to Express server in-memory & persistent state
+  try {
+    const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+    await fetch(`${baseUrl}/api/system-settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updatedSettings),
+    });
+  } catch (err) {
+    console.warn("Server system settings sync warning:", err);
+  }
+
+  // 5. Sync to Firebase Realtime Database with graceful error handling
+  try {
+    const settingsRef = ref(database, "system_settings");
+    await update(settingsRef, sanitizeForFirebase(updatedSettings));
+  } catch (err) {
+    console.warn("Firebase RTDB system settings save warning:", err);
+  }
 }
 
 // ----------------------------------------------------
@@ -1105,6 +1231,18 @@ export const DEFAULT_API_PROVIDERS: Record<string, ApiProviderConfig> = {
     defaultModel: "gemini-3.1-flash-lite",
     supportedModels: ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-pro"],
     description: "Google DeepMind এর উন্নত মাল্টিমোডাল মডেল। বাংলা ভাষায় চমৎকার দখল ও উচ্চ গতি।"
+  },
+  fal: {
+    id: "fal",
+    name: "Fal.ai API (Image Engine)",
+    apiKey: "",
+    modelId: "fal-ai/flux/schnell",
+    enabled: true,
+    active: false,
+    status: "connected",
+    defaultModel: "fal-ai/flux/schnell",
+    supportedModels: ["fal-ai/flux/schnell", "fal-ai/flux/dev", "fal-ai/flux-realism"],
+    description: "FLUX.1 Schnell ও হাই-কোয়ালিটি ইমেজ জেনারেশন ও এডিটিং করার এপিআই।"
   },
   grok: {
     id: "grok",

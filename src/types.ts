@@ -76,13 +76,13 @@ export type ModalType =
   | 'pdf_viewer'
   | 'book_library'
   | 'image_generator'
-  | 'html_viewer'
-  | 'live_voice';
+  | 'html_viewer';
 
 export type GeminiModelId = 'gemini-3.1-flash-lite' | 'gemini-3.8-flash' | 'gemini-3.6-flash';
 
 export type AdminApiProviderKey = 
   | 'gemini' 
+  | 'fal' 
   | 'grok' 
   | 'deepseek' 
   | 'openrouter' 
@@ -272,6 +272,18 @@ export const DEFAULT_API_PROVIDERS: ApiProviderConfig[] = [
     description: "Official Google Gemini AI Engine with ultra-fast responses and multimodal support.",
     defaultModel: "gemini-3.1-flash-lite",
     supportedModels: ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.6-flash"]
+  },
+  {
+    id: "fal",
+    name: "Fal.ai API (Image Engine)",
+    apiKey: "",
+    modelId: "fal-ai/flux/schnell",
+    enabled: true,
+    active: false,
+    status: "connected",
+    description: "FLUX.1 Schnell & high-quality image generation / editing models.",
+    defaultModel: "fal-ai/flux/schnell",
+    supportedModels: ["fal-ai/flux/schnell", "fal-ai/flux/dev", "fal-ai/flux-realism"]
   },
   {
     id: "grok",

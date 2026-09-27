@@ -287,6 +287,7 @@ ${fileContext.slice(0, 300)}...
 // Admin Provider Keys store in server memory
 const serverProviderConfigs: Record<string, { apiKey: string; modelId: string; enabled: boolean }> = {
   gemini: { apiKey: process.env.GEMINI_API_KEY || "", modelId: "gemini-3.6-flash", enabled: true },
+  fal: { apiKey: process.env.FAL_KEY || "952fbb38-5521-4bfc-afd5-e1893bc5e999:0870a1e510ea0cc55a72ffce676a5cf4", modelId: "fal-ai/flux/schnell", enabled: true },
   grok: { apiKey: process.env.GROK_API_KEY || "", modelId: "grok-beta", enabled: false },
   deepseek: { apiKey: process.env.DEEPSEEK_API_KEY || "", modelId: "deepseek-chat", enabled: false },
   openrouter: { apiKey: process.env.OPENROUTER_API_KEY || "", modelId: "openai/gpt-4o-mini", enabled: false },
@@ -299,6 +300,7 @@ const serverProviderConfigs: Record<string, { apiKey: string; modelId: string; e
 
 let serverActiveProvider = "gemini";
 let customSystemInstruction = "";
+let isFalKeyLocked = false; // Flag to skip Fal.ai if key is out of credits/locked
 
 // Helper to call OpenAI-compatible chat completion APIs (Grok, DeepSeek, OpenRouter, Cerebras, Mistral, HuggingFace)
 async function callOpenAICompatibleAPI(params: {
@@ -608,6 +610,29 @@ app.post("/api/admin/test-provider", async (req, res) => {
         messages: [{ role: "user", content: "Ping! Reply with 'OK - Claude is operational.'" }]
       });
       testReply = result.reply;
+    } else if (targetProvider === "fal") {
+      const falResponse = await fetch("https://fal.run/fal-ai/flux/schnell", {
+        method: "POST",
+        headers: {
+          "Authorization": `Key ${keyToUse}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          prompt: "a tiny green dot",
+          image_size: "square",
+          sync_mode: true
+        })
+      });
+      if (!falResponse.ok) {
+        const errText = await falResponse.text();
+        throw new Error(`Fal.ai API error (${falResponse.status}): ${errText}`);
+      }
+      const data = await falResponse.json() as any;
+      if (data?.images?.[0]?.url) {
+        testReply = "OK - Fal.ai is operational. Image generated successfully.";
+      } else {
+        throw new Error("No image generated.");
+      }
     } else {
       testReply = "Provider tested successfully.";
     }
@@ -1272,7 +1297,9 @@ let serverSystemSettings = {
   imageWatermarkText: "Sajjat AI",
   aiBrandName: "Sajjat AI",
   aiTagline: "মানুষের সেবায় নিবেদিত সর্বাধুনিক সুপার ইন্টেলিজেন্ট বাংলা এআই সহকারী",
-  aiThemeColor: "indigo"
+  aiThemeColor: "indigo",
+  adminTapCount: 7,
+  adminPassword: ""
 };
 
 // System Settings API endpoints for Admin Panel synchronization
@@ -1596,6 +1623,75 @@ Output ONLY the translated English description, with no explanation, no markdown
   else if (options.aspectRatio === "9:16") mappedAspectRatio = "9:16";
   else if (options.aspectRatio === "4:3") mappedAspectRatio = "4:3";
   else if (options.aspectRatio === "3:4") mappedAspectRatio = "3:4";
+
+  // 2.5. Map Aspect Ratio to Fal.ai supported format
+  let imageSize: any = "square_hd";
+  if (mappedAspectRatio === "16:9") {
+    imageSize = "landscape_16_9";
+  } else if (mappedAspectRatio === "9:16") {
+    imageSize = "portrait_16_9";
+  } else if (mappedAspectRatio === "4:3") {
+    imageSize = "landscape_4_3";
+  } else if (mappedAspectRatio === "3:4") {
+    imageSize = { width: 768, height: 1024 };
+  }
+
+  // --- PRIORITIZE FAL.AI FOR IMAGE GENERATION ---
+  if (!isFalKeyLocked && (serverProviderConfigs.fal?.enabled !== false)) {
+    try {
+      const falKey = serverProviderConfigs.fal?.apiKey || process.env.FAL_KEY || "952fbb38-5521-4bfc-afd5-e1893bc5e999:0870a1e510ea0cc55a72ffce676a5cf4";
+      const falModel = serverProviderConfigs.fal?.modelId || "fal-ai/flux/schnell";
+      console.log(`[FAL-AI Image Gen] Requesting image via ${falModel} for prompt: "${visualPrompt}" with size: ${JSON.stringify(imageSize)}`);
+
+      const falResponse = await fetch(`https://fal.run/${falModel}`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Key ${falKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          prompt: visualPrompt,
+          image_size: imageSize,
+          sync_mode: true
+        })
+      });
+
+      if (falResponse.ok) {
+        const falData = await falResponse.ok ? await falResponse.json() as any : null;
+        const generatedImage = falData?.images?.[0];
+
+        if (generatedImage?.url) {
+          console.log(`[FAL-AI Image Gen] Success! Image URL: ${generatedImage.url}`);
+          return {
+            imageUrl: generatedImage.url,
+            directUrl: generatedImage.url,
+            prompt: userPrompt,
+            refinedPrompt: visualPrompt,
+            caption: caption,
+            model: `Fal.ai / FLUX Schnell`,
+            aspectRatio: mappedAspectRatio,
+            debugInfo: {
+              userPrompt: userPrompt,
+              finalImagePrompt: visualPrompt,
+              modelUsed: "Fal.ai / FLUX Schnell",
+              apiStatus: "Success"
+            }
+          };
+        }
+      } else {
+        const errText = await falResponse.text();
+        console.warn(`[FAL-AI Image Gen] Fal.ai API error (status: ${falResponse.status}): ${errText}`);
+        if (falResponse.status === 403 || errText.includes("TOP_UP") || errText.includes("locked")) {
+          console.warn("[FAL-AI Image Gen] Fal.ai key requires top-up or is locked. Disabling Fal.ai to bypass further errors and use fast fallback.");
+          isFalKeyLocked = true;
+        }
+      }
+    } catch (falErr) {
+      console.error("[FAL-AI Image Gen] Connection exception:", falErr);
+    }
+  } else {
+    console.log("[FAL-AI Image Gen] Fal.ai is currently marked as locked or out of credits. Bypassing to use Gemini/Pollinations fallback instantly.");
+  }
 
   // 3. Generate image using Google GenAI native models (gemini-3.1-flash-image, imagen-3.0-generate-002, etc.)
   const nativeModels = [
@@ -2093,214 +2189,7 @@ app.get("/Sajjat_AI.html", (req, res) => {
   res.sendFile(filePath);
 });
 
-// ==========================================
-// 🎙️ Gemini 3.8 Live API WebSocket Gateway
-// Real-time two-way voice streaming bridge
-// ==========================================
-const wss = new WebSocketServer({ noServer: true });
 
-server.on("upgrade", (request, socket, head) => {
-  try {
-    const host = request.headers.host || "localhost";
-    const parsedUrl = new URL(request.url || "", `http://${host}`);
-    const pathname = parsedUrl.pathname.replace(/\/$/, "");
-    console.log(`[SERVER-UPGRADE] Upgrade request received on host: ${host}, path: ${parsedUrl.pathname} (sanitized: ${pathname})`);
-    if (pathname === "/api/live") {
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit("connection", ws, request);
-      });
-    } else {
-      console.log(`[SERVER-UPGRADE] Pathname ${pathname} did not match "/api/live". Upgrade rejected.`);
-    }
-  } catch (err) {
-    console.error("WebSocket upgrade error:", err);
-  }
-});
-
-wss.on("connection", async (clientWs: WebSocket, request: http.IncomingMessage) => {
-  let parsedUrl: URL;
-  try {
-    const host = request.headers.host || "localhost";
-    parsedUrl = new URL(request.url || "", `http://${host}`);
-  } catch {
-    parsedUrl = new URL("http://localhost/api/live");
-  }
-
-  // Check if live voice is enabled by admin
-  if (serverSystemSettings.liveVoiceEnabled === false) {
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(JSON.stringify({
-        type: "error",
-        error: serverSystemSettings.liveVoiceNotice || "লাইভ ভয়েস চ্যাট সাময়িকভাবে অ্যাডমিন কর্তৃক বন্ধ রাখা হয়েছে।"
-      }));
-      clientWs.close();
-    }
-    return;
-  }
-
-  const requestedVoice = parsedUrl.searchParams.get("voice") || serverSystemSettings.liveVoiceName || "Zephyr";
-  const customKey = parsedUrl.searchParams.get("key") || "";
-  const activeApiKey = customKey || serverProviderConfigs.gemini?.apiKey || process.env.GEMINI_API_KEY;
-
-  if (!activeApiKey) {
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(JSON.stringify({
-        type: "error",
-        error: "Gemini API কী পাওয়া যায়নি। অনুগ্রহ করে সার্ভারে GEMINI_API_KEY সেট করুন।"
-      }));
-      clientWs.close();
-    }
-    return;
-  }
-
-  const liveAi = new GoogleGenAI({
-    apiKey: activeApiKey,
-    httpOptions: { headers: { "User-Agent": "aistudio-build" } }
-  });
-
-  let session: any = null;
-  let isClosed = false;
-
-  try {
-    const customVoiceInstruction = serverSystemSettings.liveVoiceInstruction ? `${serverSystemSettings.liveVoiceInstruction}\n\n` : "";
-    const currentAiName = serverSystemSettings.aiBrandName || "Sajjat AI";
-    const currentCreator = "Sajjat Mia";
-
-    const liveVoiceSystemPrompt = `${customVoiceInstruction}${SAJJAT_AI_SYSTEM_INSTRUCTION}
-
-REAL-TIME TWO-WAY LIVE VOICE CONVERSATION DIRECTIVES:
-1. You are speaking directly with the user in a continuous, real-time live voice conversation.
-2. Keep your spoken answers concise, direct, natural, and conversational. Speak in simple, clear sentences.
-3. Default to fluent Bengali (বাংলা) or English matching whatever language the user speaks to you.
-4. Do NOT say markdown formatting like asterisks, hashtags, bullet points, or code tags. Speak naturally like a human assistant.
-5. If the user greets you (e.g. "হ্যালো", "হাই", "কেমন আছো?"), greet back warmly and concisely as ${currentAiName}, created by ${currentCreator}.`;
-
-    session = await liveAi.live.connect({
-      model: "gemini-3.8-live",
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: requestedVoice } }
-        },
-        systemInstruction: liveVoiceSystemPrompt
-      },
-      callbacks: {
-        onmessage: (msg: LiveServerMessage) => {
-          if (isClosed || clientWs.readyState !== WebSocket.OPEN) return;
-
-          // 1. Audio and text parts from Gemini model
-          if (msg.serverContent?.modelTurn?.parts) {
-            for (const part of msg.serverContent.modelTurn.parts) {
-              if (part.inlineData?.data) {
-                clientWs.send(JSON.stringify({
-                  type: "audio",
-                  data: part.inlineData.data,
-                  mimeType: part.inlineData.mimeType || "audio/pcm;rate=24000"
-                }));
-              }
-              if (part.text) {
-                clientWs.send(JSON.stringify({
-                  type: "text",
-                  text: part.text
-                }));
-              }
-            }
-          }
-
-          // 2. Interrupted by user speaking (Voice Activity Detection barge-in)
-          if (msg.serverContent?.interrupted) {
-            clientWs.send(JSON.stringify({ type: "interrupted" }));
-          }
-
-          // 3. Model turn completed
-          if (msg.serverContent?.turnComplete) {
-            clientWs.send(JSON.stringify({ type: "turnComplete" }));
-          }
-        },
-        onerror: (err: any) => {
-          console.error("Gemini Live session error:", err);
-          if (!isClosed && clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(JSON.stringify({
-              type: "error",
-              error: err?.message || "Gemini Live সেশনে ত্রুটি হয়েছে।"
-            }));
-          }
-        },
-        onclose: () => {
-          if (!isClosed && clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(JSON.stringify({ type: "closed" }));
-          }
-        }
-      }
-    });
-
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(JSON.stringify({
-        type: "connected",
-        model: "gemini-3.8-live",
-        voice: requestedVoice
-      }));
-    }
-
-    clientWs.on("message", (raw: any) => {
-      if (isClosed || !session) return;
-      try {
-        const msg = JSON.parse(raw.toString());
-        if (msg.type === "ping") {
-          clientWs.send(JSON.stringify({ type: "pong" }));
-          return;
-        }
-        if (msg.type === "audio" && msg.data) {
-          // Realtime 16kHz PCM audio chunk from client microphone
-          session.sendRealtimeInput({
-            audio: {
-              data: msg.data,
-              mimeType: "audio/pcm;rate=16000"
-            }
-          });
-        } else if (msg.type === "text" && msg.text) {
-          session.sendClientContent({
-            turns: [{ role: "user", parts: [{ text: msg.text }] }],
-            turnComplete: true
-          });
-        }
-      } catch (e) {
-        console.error("Error processing client live voice input:", e);
-      }
-    });
-
-    clientWs.on("close", () => {
-      isClosed = true;
-      if (session) {
-        try {
-          session.close();
-        } catch {}
-        session = null;
-      }
-    });
-
-    clientWs.on("error", (err) => {
-      console.error("Client Live WS error:", err);
-      isClosed = true;
-      if (session) {
-        try {
-          session.close();
-        } catch {}
-        session = null;
-      }
-    });
-
-  } catch (err: any) {
-    console.error("Failed to connect to Gemini Live:", err);
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(JSON.stringify({
-        type: "error",
-        error: err?.message || "Gemini Live API-এর সাথে সংযোগ স্থাপন করা সম্ভব হয়নি।"
-      }));
-      clientWs.close();
-    }
-  }
-});
 
 server.on("error", (err: any) => {
   console.error("HTTP Server error:", err);

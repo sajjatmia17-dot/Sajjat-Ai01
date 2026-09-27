@@ -49,6 +49,15 @@ const PROVIDER_METAS: Record<AdminApiProviderKey, ProviderMeta> = {
     placeholderKey: "AIzaSy...",
     description: "Ultra-fast multimodal reasoning model with deep Bangla understanding and web search capabilities."
   },
+  fal: {
+    id: "fal",
+    name: "Fal.ai API",
+    badge: "Image & Edit Studio",
+    color: "from-purple-500 to-pink-600",
+    docsUrl: "https://fal.ai",
+    placeholderKey: "Key ...",
+    description: "High-quality, extremely fast image generation and editing models powered by FLUX.1 Schnell."
+  },
   grok: {
     id: "grok",
     name: "xAI Grok API",
@@ -513,7 +522,7 @@ export const AdminApiProviders: React.FC<AdminApiProvidersProps> = ({ onProvider
                   </button>
                 </div>
 
-                {!provider.active && (
+                {!provider.active && provider.id !== "fal" && (
                   <button
                     type="button"
                     onClick={() => handleSetActiveProvider(provider.id)}
