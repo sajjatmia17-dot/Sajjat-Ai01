@@ -7,25 +7,39 @@ import {
   FileCode, 
   X,
   Sparkles,
-  Palette
+  Mic,
+  MicOff,
+  PhoneCall
 } from "lucide-react";
 import { AttachedFile, SystemSettingsConfig } from "../types";
+import type { PublicAiCapabilities } from "../api";
 
 interface ChatInputProps {
   onSendMessage: (text: string, attachedFile?: AttachedFile) => void;
   isLoading: boolean;
   onOpenImageGenerator?: () => void;
+  onStartVoiceCall?: () => void;
   systemSettings?: SystemSettingsConfig | null;
+  aiCapabilities?: PublicAiCapabilities | null;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
   onSendMessage,
   isLoading,
   onOpenImageGenerator,
+  onStartVoiceCall,
   systemSettings,
+  aiCapabilities,
 }) => {
+  const canFileUpload = aiCapabilities?.supportedFeatures?.fileUpload !== false;
+  const canImageVision = aiCapabilities?.supportedFeatures?.imageVision !== false;
+  const canImageGen = aiCapabilities?.supportedFeatures?.imageGen !== false;
+  const canVoice = aiCapabilities?.supportedFeatures?.voice !== false;
   const [text, setText] = useState("");
   const [attachedFile, setAttachedFile] = useState<AttachedFile | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -40,6 +54,68 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       )}px`;
     }
   }, [text]);
+
+  // Clean up speech recognition on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+    };
+  }, []);
+
+  // Web Speech Recognition (Bengali & English)
+  const toggleSpeechRecognition = () => {
+    if (isListening) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      setIsListening(false);
+      return;
+    }
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert("আপনার ব্রাউজারে স্পিচ রিকগনিশন সমর্থিত নয়। অনুগ্রহ করে Google Chrome বা আধুনিক ব্রাউজার ব্যবহার করুন।");
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.lang = "bn-BD";
+      recognition.continuous = false;
+      recognition.interimResults = true;
+
+      recognition.onstart = () => {
+        setIsListening(true);
+      };
+
+      recognition.onresult = (event: any) => {
+        let transcript = "";
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript;
+        }
+        if (transcript) {
+          setText((prev) => (prev ? `${prev} ${transcript}` : transcript));
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.warn("Speech recognition error:", event.error);
+        setIsListening(false);
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (err) {
+      console.error("Speech recognition startup error:", err);
+      setIsListening(false);
+    }
+  };
 
   // Image Upload
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -167,57 +243,65 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         )}
 
         {/* Main Input Bar */}
-        <div className="relative flex items-end gap-1.5 sm:gap-2 bg-slate-950/90 border border-slate-800 focus-within:border-indigo-500/70 focus-within:ring-1 focus-within:ring-indigo-500/30 rounded-2xl p-1.5 sm:p-2 transition-all shadow-inner">
+        <div className="relative flex items-end gap-1 sm:gap-1.5 bg-slate-950/90 border border-slate-800 focus-within:border-indigo-500/70 focus-within:ring-1 focus-within:ring-indigo-500/30 rounded-2xl p-1.5 sm:p-2 transition-all shadow-inner">
           {/* Document / Any File Upload */}
-          {systemSettings?.fileUploadEnabled !== false && (
-            <>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".txt,.md,.json,.js,.jsx,.ts,.tsx,.py,.html,.css,.csv,.c,.cpp,.java,.pdf,.doc,.docx"
-                onChange={handleFileSelect}
-                className="hidden"
-              />
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="p-2 text-slate-400 hover:text-indigo-400 hover:bg-slate-800/80 rounded-xl transition-colors shrink-0"
-                title="ফাইল বা কোড আপলোড করুন (.txt, .js, .py, .html, ইত্যাদি)"
-              >
-                <Paperclip className="w-4.5 h-4.5" />
-              </button>
-            </>
-          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".txt,.md,.json,.js,.jsx,.ts,.tsx,.py,.html,.css,.csv,.c,.cpp,.java,.pdf,.doc,.docx"
+            onChange={handleFileSelect}
+            className="hidden"
+          />
+          <button
+            type="button"
+            disabled={!canFileUpload}
+            onClick={() => canFileUpload && fileInputRef.current?.click()}
+            className={`p-2 rounded-xl transition-colors shrink-0 ${
+              canFileUpload
+                ? "text-slate-400 hover:text-indigo-400 hover:bg-slate-800/80 cursor-pointer"
+                : "text-slate-600 opacity-45 cursor-not-allowed"
+            }`}
+            title={
+              canFileUpload
+                ? "ফাইল বা কোড আপলোড করুন (.txt, .js, .py, .html, ইত্যাদি)"
+                : "সক্রিয় AI Provider ফাইল আপলোড সমর্থন করে না"
+            }
+          >
+            <Paperclip className="w-4.5 h-4.5" />
+          </button>
 
           {/* Image Upload */}
-          {systemSettings?.imageUploadEnabled !== false && (
-            <>
-              <input
-                ref={imageInputRef}
-                type="file"
-                accept="image/*"
-                onChange={handleImageSelect}
-                className="hidden"
-              />
-              <button
-                type="button"
-                onClick={() => imageInputRef.current?.click()}
-                className="p-2 text-slate-400 hover:text-cyan-400 hover:bg-slate-800/80 rounded-xl transition-colors shrink-0"
-                title="ছবি সংযুক্ত করুন"
-              >
-                <ImageIcon className="w-4.5 h-4.5" />
-              </button>
-            </>
-          )}
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/*"
+            onChange={handleImageSelect}
+            className="hidden"
+          />
+          <button
+            type="button"
+            disabled={!canImageVision}
+            onClick={() => canImageVision && imageInputRef.current?.click()}
+            className={`p-2 rounded-xl transition-colors shrink-0 ${
+              canImageVision
+                ? "text-slate-400 hover:text-cyan-400 hover:bg-slate-800/80 cursor-pointer"
+                : "text-slate-600 opacity-45 cursor-not-allowed"
+            }`}
+            title={
+              canImageVision
+                ? "ছবি সংযুক্ত করুন"
+                : "সক্রিয় AI Provider Image Vision সমর্থন করে না"
+            }
+          >
+            <ImageIcon className="w-4.5 h-4.5" />
+          </button>
 
           {/* AI Image Generation Studio Tool */}
           <button
             type="button"
+            disabled={!canImageGen}
             onClick={() => {
-              if (systemSettings?.imageGenerationEnabled === false) {
-                alert(systemSettings.imageGenerationNotice || "ছবি তৈরির সুবিধাটি সাময়িকভাবে অ্যাডমিন দ্বারা বন্ধ রাখা হয়েছে।");
-                return;
-              }
+              if (!canImageGen) return;
               if (onOpenImageGenerator) {
                 onOpenImageGenerator();
               } else {
@@ -225,18 +309,57 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                 textareaRef.current?.focus();
               }
             }}
-            className={`p-2 rounded-xl transition-colors shrink-0 cursor-pointer ${
-              systemSettings?.imageGenerationEnabled === false
-                ? "text-slate-600 hover:text-slate-500 opacity-60"
-                : "text-slate-400 hover:text-purple-400 hover:bg-slate-800/80"
+            className={`p-2 rounded-xl transition-colors shrink-0 ${
+              canImageGen
+                ? "text-slate-400 hover:text-purple-400 hover:bg-slate-800/80 cursor-pointer"
+                : "text-slate-600 opacity-45 cursor-not-allowed"
             }`}
             title={
-              systemSettings?.imageGenerationEnabled === false
-                ? "ছবি তৈরি সাময়িকভাবে বন্ধ আছে"
-                : `${systemSettings?.aiBrandName || "Sajjat AI"} দিয়ে ছবি তৈরি করুন (AI Art Generator)`
+              canImageGen
+                ? `${systemSettings?.aiBrandName || "Sajjat Ai"} দিয়ে ছবি তৈরি করুন (AI Art Generator)`
+                : "সক্রিয় AI Provider ছবি তৈরি সমর্থন করে না"
             }
           >
-            <Sparkles className={`w-4.5 h-4.5 ${systemSettings?.imageGenerationEnabled === false ? "text-slate-600" : "text-purple-400"}`} />
+            <Sparkles className={`w-4.5 h-4.5 ${canImageGen ? "text-purple-400" : "text-slate-600"}`} />
+          </button>
+
+          {/* Live Voice Call Button in Input Dock */}
+          {onStartVoiceCall && (
+            <button
+              type="button"
+              disabled={!canVoice}
+              onClick={() => canVoice && onStartVoiceCall()}
+              className={`p-2 rounded-xl transition-colors shrink-0 ${
+                canVoice
+                  ? "text-slate-400 hover:text-cyan-400 hover:bg-slate-800/80 cursor-pointer"
+                  : "text-slate-600 opacity-45 cursor-not-allowed"
+              }`}
+              title={
+                canVoice
+                  ? "সরাসরি ভয়েস কল মোড"
+                  : "সক্রিয় AI Provider লাইভ ভয়েস সমর্থন করে না"
+              }
+            >
+              <PhoneCall className={`w-4.5 h-4.5 ${canVoice ? "text-cyan-400" : "text-slate-600"}`} />
+            </button>
+          )}
+
+          {/* Microphone Speech to Text Button */}
+          <button
+            type="button"
+            onClick={toggleSpeechRecognition}
+            className={`p-2 rounded-xl transition-colors shrink-0 cursor-pointer ${
+              isListening
+                ? "bg-rose-500/20 text-rose-400 border border-rose-500/40 animate-pulse"
+                : "text-slate-400 hover:text-emerald-400 hover:bg-slate-800/80"
+            }`}
+            title={isListening ? "ভয়েস রেকর্ডিং বন্ধ করুন" : "মুখে বাংলায় বলে টাইপ করুন (Voice Input)"}
+          >
+            {isListening ? (
+              <MicOff className="w-4.5 h-4.5 text-rose-400" />
+            ) : (
+              <Mic className="w-4.5 h-4.5 text-emerald-400" />
+            )}
           </button>
 
           {/* Main textarea */}

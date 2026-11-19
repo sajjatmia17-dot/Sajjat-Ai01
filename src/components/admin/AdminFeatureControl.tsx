@@ -60,19 +60,8 @@ export const AdminFeatureControl: React.FC = () => {
     }));
 
     try {
-      // Instantly persist to Firebase RTDB
+      // Instantly persist to Firebase RTDB & Bearer-authenticated server API
       await saveSystemSettings({ [key]: newVal });
-
-      // Sync to server in-memory settings
-      try {
-        await fetch(`${getBackendBaseUrl()}/api/system-settings`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ [key]: newVal })
-        });
-      } catch (e) {
-        console.warn("Server system-settings sync failed:", e);
-      }
     } catch (err: any) {
       console.error("Failed to save feature toggle:", err);
       // Revert if error occurs
@@ -89,18 +78,6 @@ export const AdminFeatureControl: React.FC = () => {
     setSavedSuccess(false);
     try {
       await saveSystemSettings(settings);
-      
-      // Also update server memory
-      try {
-        await fetch(`${getBackendBaseUrl()}/api/system-settings`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(settings)
-        });
-      } catch (e) {
-        console.warn("Server sync error:", e);
-      }
-
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 3000);
     } catch (err: any) {

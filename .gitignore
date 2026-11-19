@@ -6,3 +6,5 @@ coverage/
 *.log
 .env*
 !.env.example
+.sajjat-providers.json
+.sajjat-admin-passcode.json

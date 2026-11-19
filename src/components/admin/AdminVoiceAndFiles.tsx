@@ -99,18 +99,6 @@ export const AdminVoiceAndFiles: React.FC = () => {
     setIsSaving(true);
     try {
       await saveSystemSettings(settings);
-
-      // Also sync to server in-memory settings
-      try {
-        await fetch(`${getBackendBaseUrl()}/api/system-settings`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(settings)
-        });
-      } catch (err) {
-        console.warn("Server system-settings sync:", err);
-      }
-
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 2500);
     } catch (err) {

@@ -116,17 +116,6 @@ export const AdminLimitsAndPackages: React.FC = () => {
         aiLimitSystemEnabled: newVal
       });
 
-      // Also sync to server memory
-      try {
-        await fetch(`${getBackendBaseUrl()}/api/system-settings`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ aiLimitSystemEnabled: newVal })
-        });
-      } catch (e) {
-        console.warn("Server sync failed:", e);
-      }
-
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
     } catch (err: any) {

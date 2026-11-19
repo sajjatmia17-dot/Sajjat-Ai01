@@ -142,18 +142,6 @@ export const AdminBranding: React.FC = () => {
       };
 
       await saveSystemSettings(payload);
-
-      // Also sync to server in-memory settings
-      try {
-        await fetch(`${getBackendBaseUrl()}/api/system-settings`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-      } catch (err) {
-        console.warn("Server system-settings sync:", err);
-      }
-
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 2500);
     } catch (err) {

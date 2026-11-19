@@ -52,6 +52,8 @@ export interface ChatMessage {
   generatedImageUrl?: string;
   generatedImagePrompt?: string;
   watermarkedImageUrl?: string;
+  universalSearch?: UniversalSearchPayload;
+  feedback?: 'like' | 'dislike' | null;
 }
 
 export interface ChatSession {
@@ -71,7 +73,7 @@ export type ModalType =
   | 'settings' 
   | 'help' 
   | 'notifications'
-  | 'admin_login'
+  | 'live_voice'
   | 'confirm_delete_all'
   | 'pdf_viewer'
   | 'book_library'
@@ -80,28 +82,64 @@ export type ModalType =
 
 export type GeminiModelId = 'gemini-3.1-flash-lite' | 'gemini-3.8-flash' | 'gemini-3.6-flash';
 
-export type AdminApiProviderKey = 
-  | 'gemini' 
-  | 'fal' 
-  | 'grok' 
-  | 'deepseek' 
-  | 'openrouter' 
-  | 'huggingface' 
-  | 'cerebras' 
-  | 'cohere' 
-  | 'mistral' 
-  | 'claude';
+export type AdminApiProviderKey =
+  | 'gemini'
+  | 'fal'
+  | 'grok'
+  | 'deepseek'
+  | 'openrouter'
+  | 'huggingface'
+  | 'cerebras'
+  | 'cohere'
+  | 'mistral'
+  | 'claude'
+  | (string & {});
+
+export type ProviderApiType =
+  | 'openai_compatible'
+  | 'gemini'
+  | 'anthropic'
+  | 'cohere'
+  | 'huggingface'
+  | 'custom_rest';
+
+export type ProviderAuthMethod =
+  | 'bearer'
+  | 'x-api-key'
+  | 'query_param'
+  | 'custom_header';
+
+export interface ProviderFeatureCapabilities {
+  textChat: boolean;
+  imageVision: boolean;
+  fileUpload: boolean;
+  voice: boolean;
+  imageGen: boolean;
+}
 
 export interface ApiProviderConfig {
   id: AdminApiProviderKey;
   name: string;
   apiKey: string;
+  hasKey?: boolean;
+  maskedKey?: string;
+  baseUrl?: string;
+  apiType?: ProviderApiType;
+  authMethod?: ProviderAuthMethod;
+  customAuthHeaderName?: string;
+  priority?: number;
+  isCustom?: boolean;
+  supportedFeatures?: ProviderFeatureCapabilities;
   modelId: string;
   enabled: boolean;
   active: boolean;
-  status: 'connected' | 'not_connected' | 'testing' | 'error';
+  status: 'connected' | 'not_connected' | 'testing' | 'error' | 'rate_limited';
   lastTestedAt?: string;
-  latencyMs?: number;
+  lastSuccessAt?: string | null;
+  lastError?: string | null;
+  latencyMs?: number | null;
+  rateLimitHeaders?: Record<string, string> | null;
+  isLocked?: boolean;
   description?: string;
   defaultModel: string;
   supportedModels: string[];
@@ -128,6 +166,7 @@ export interface SystemSettingsConfig {
 
   // ⚙️ Modular Feature Controls (Admin Managed)
   webSearchEnabled?: boolean;
+  universalSearch?: UniversalSearchAdminConfig;
   readAloudEnabled?: boolean;
   bookLibraryEnabled?: boolean;
   userNotificationsEnabled?: boolean;
@@ -440,6 +479,103 @@ export interface LivePresenceUser {
   isAdmin?: boolean;
 }
 
+export type UniversalSearchCategory =
+  | 'web'
+  | 'news'
+  | 'video'
+  | 'audio'
+  | 'image'
+  | 'document'
+  | 'website';
 
+export interface UniversalSearchResultItem {
+  id: string;
+  category: UniversalSearchCategory;
+  title: string;
+  description: string;
+  sourceName: string;
+  originalUrl: string;
+  youtubeVideoId?: string;
+  thumbnailUrl?: string;
+  publishedAt?: string;
+  duration?: string;
+  channelOrAuthor?: string;
+  embedUrl?: string;
+  playableAudioUrl?: string;
+  playableVideoUrl?: string;
+  previewOnly?: boolean;
+  downloadAllowed: boolean;
+  downloadUrl?: string;
+  licenseInfo?: string;
+  fileType?: string;
+  relatedVideos?: UniversalSearchResultItem[];
+}
 
+export interface UniversalSearchPayload {
+  intent: UniversalSearchCategory | 'chat';
+  refinedQuery: string;
+  summaryMarkdown: string;
+  results: UniversalSearchResultItem[];
+  sourcesUsed: string[];
+  notice?: string;
+  latencyMs?: number;
+  autoPlayFirst?: boolean;
+}
 
+export interface UniversalSearchAdminConfig {
+  enabled: boolean;
+  youtubeEnabled: boolean;
+  webSearchEnabled: boolean;
+  videoSearchEnabled: boolean;
+  audioSearchEnabled: boolean;
+  imageSearchEnabled: boolean;
+  websiteSearchEnabled: boolean;
+  documentSearchEnabled: boolean;
+  downloadPermissionEnabled: boolean;
+}
+
+export interface UniversalSearchHistoryLog {
+  id: string;
+  query: string;
+  intent: UniversalSearchCategory;
+  uid?: string;
+  userName?: string;
+  resultCount: number;
+  sourcesUsed: string[];
+  latencyMs: number;
+  timestamp: number;
+}
+
+export interface UniversalSearchErrorLog {
+  id: string;
+  intent: string;
+  provider: string;
+  query: string;
+  message: string;
+  timestamp: number;
+}
+
+export interface UniversalSearchStatsResponse {
+  config: UniversalSearchAdminConfig;
+  envStatus: {
+    geminiConfigured: boolean;
+    youtubeApiConfigured: boolean;
+    googleSearchApiConfigured: boolean;
+    pexelsConfigured: boolean;
+    pixabayConfigured: boolean;
+  };
+  usage: {
+    totalSearches: number;
+    byIntent: Record<string, number>;
+    apiCalls: Record<string, number>;
+    errorCount: number;
+  };
+  history: UniversalSearchHistoryLog[];
+  errors: UniversalSearchErrorLog[];
+}
+
+export interface AudioLibraryState {
+  favorites: UniversalSearchResultItem[];
+  playlist: UniversalSearchResultItem[];
+  recentlyPlayed: UniversalSearchResultItem[];
+}

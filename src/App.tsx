@@ -10,12 +10,14 @@ import { PrivacyModal } from "./components/PrivacyModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { HelpModal } from "./components/HelpModal";
 import { DeleteConfirmModal } from "./components/DeleteConfirmModal";
-import { AdminLoginModal } from "./components/AdminLoginModal";
-import { AdminPanel } from "./components/AdminPanel";
+import { LiveVoiceModal } from "./components/LiveVoiceModal";
 import { NotificationsModal } from "./components/NotificationsModal";
 import { BookViewerModal } from "./components/BookViewerModal";
 import { ImageGeneratorModal } from "./components/ImageGeneratorModal";
 import { HtmlViewerModal } from "./components/HtmlViewerModal";
+import { AudioPlayerDock } from "./components/AudioPlayerDock";
+import { AdminLoginModal } from "./components/AdminLoginModal";
+import { AdminPanel } from "./components/AdminPanel";
 import { 
   UserProfile, 
   ChatSession, 
@@ -28,10 +30,23 @@ import {
   SystemSettingsConfig,
   UserAiLimit,
   PremiumPackage,
-  PurchaseRequest
+  PurchaseRequest,
+  AudioLibraryState,
+  UniversalSearchResultItem,
 } from "./types";
+import { WebPushPopup } from "./components/WebPushPopup";
+import { onForegroundMessage } from "./utils/fcmWebPush";
+import { ref, get, set } from "firebase/database";
+import { getPersonalAnswer, generateClientFallbackReply } from "./knowledge";
+import { sendChatMessage, isImageGenerationIntent, runUniversalSearchApi, updateUniversalSearchConfigApi, fetchPublicAiCapabilities, type PublicAiCapabilities } from "./api";
+import { 
+  safeGetGuestSessions, 
+  safeSaveGuestSessions, 
+  safeClearGuestSessions 
+} from "./storage";
 import { 
   auth, 
+  database,
   getUserProfile, 
   syncUserProfileToDatabase,
   getOrCreateGuestId,
@@ -45,19 +60,15 @@ import {
   subscribeToBooks,
   subscribeToSystemSettings,
   isAdmin,
+  ADMIN_EMAIL,
+  verifyBackendAdminAccess,
+  reportUnauthorizedAdminAttempt,
   subscribeToUserAiLimit,
   incrementUserAiLimit,
   submitPurchaseRequest,
   subscribeToPackages,
   subscribeToPurchaseRequests
 } from "./firebase";
-import { getPersonalAnswer, generateClientFallbackReply } from "./knowledge";
-import { sendChatMessage } from "./api";
-import { 
-  safeGetGuestSessions, 
-  safeSaveGuestSessions, 
-  safeClearGuestSessions 
-} from "./storage";
 import { searchBooks, isBookSearchQuery, formatBookSearchResponse } from "./utils/bookSearch";
 import { BookItem } from "./types";
 
@@ -69,9 +80,6 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
   const [modalType, setModalType] = useState<ModalType>("none");
   const [theme, setTheme] = useState<"dark" | "light">("dark");
-  
-  // Admin Panel State
-  const [isAdminViewOpen, setIsAdminViewOpen] = useState<boolean>(false);
 
   // Live Firebase Notifications & Content
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
@@ -83,12 +91,28 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState<GeminiModelId>(() => {
     try {
       const saved = localStorage.getItem("sajjat_ai_model");
-      if (saved && (saved === "gemini-3.1-flash-lite" || saved === "gemini-3.8-flash" || saved === "gemini-flash-latest")) {
+      if (saved && (saved === "gemini-3.1-flash-lite" || saved === "gemini-3.8-flash" || saved === "gemini-3.6-flash")) {
         return saved as GeminiModelId;
       }
     } catch (e) {}
     return "gemini-3.8-flash";
   });
+
+  // Admin Access & Security Gate State
+  const [showAdminLogin, setShowAdminLogin] = useState(false);
+  const [verifiedAdminUser, setVerifiedAdminUser] = useState<UserProfile | null>(null);
+  const [adminDeniedMessage, setAdminDeniedMessage] = useState<string | null>(null);
+  const [aiCapabilities, setAiCapabilities] = useState<PublicAiCapabilities | null>(null);
+
+  const refreshAiCapabilities = useCallback(() => {
+    fetchPublicAiCapabilities()
+      .then((caps) => setAiCapabilities(caps))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    refreshAiCapabilities();
+  }, [refreshAiCapabilities]);
 
   // Modal states for deleting chats
   const [deleteModalState, setDeleteModalState] = useState<{
@@ -113,6 +137,148 @@ export default function App() {
   const [userLimit, setUserLimit] = useState<UserAiLimit | null>(null);
   const [showPremiumModal, setShowPremiumModal] = useState(false);
   const [guestUsedCount, setGuestUsedCount] = useState<number>(0);
+
+  // Persistent Audio Player & Library State (Favorites, Playlist, Recently Played)
+  const [currentTrack, setCurrentTrack] = useState<UniversalSearchResultItem | null>(null);
+  const [audioQueue, setAudioQueue] = useState<UniversalSearchResultItem[]>([]);
+  const [isAudioPlaying, setIsAudioPlaying] = useState<boolean>(false);
+  const [audioLibrary, setAudioLibrary] = useState<AudioLibraryState>(() => {
+    try {
+      const saved = localStorage.getItem("sajjat_audio_library");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          favorites: Array.isArray(parsed.favorites) ? parsed.favorites : [],
+          playlist: Array.isArray(parsed.playlist) ? parsed.playlist : [],
+          recentlyPlayed: Array.isArray(parsed.recentlyPlayed) ? parsed.recentlyPlayed : [],
+        };
+      }
+    } catch {}
+    return { favorites: [], playlist: [], recentlyPlayed: [] };
+  });
+
+  const persistAudioLibrary = useCallback(
+    (nextLib: AudioLibraryState) => {
+      try {
+        localStorage.setItem("sajjat_audio_library", JSON.stringify(nextLib));
+      } catch {}
+      if (user?.uid) {
+        try {
+          set(ref(database, `users/${user.uid}/audio_library`), nextLib).catch(() => {});
+        } catch {}
+      }
+    },
+    [user?.uid]
+  );
+
+  // Load user's saved audio library from RTDB on login (gracefully ignoring if rules restrict)
+  useEffect(() => {
+    if (!user?.uid) return;
+    try {
+      get(ref(database, `users/${user.uid}/audio_library`))
+        .then((snap) => {
+          if (snap.exists()) {
+            const val = snap.val();
+            setAudioLibrary((prev) => ({
+              favorites: Array.isArray(val.favorites) ? val.favorites : prev.favorites,
+              playlist: Array.isArray(val.playlist) ? val.playlist : prev.playlist,
+              recentlyPlayed: Array.isArray(val.recentlyPlayed) ? val.recentlyPlayed : prev.recentlyPlayed,
+            }));
+          }
+        })
+        .catch(() => {});
+    } catch {}
+  }, [user?.uid]);
+
+  const handlePlayAudioTrack = useCallback(
+    (track: UniversalSearchResultItem, queueList?: UniversalSearchResultItem[]) => {
+      setCurrentTrack(track);
+      if (queueList && queueList.length > 0) {
+        setAudioQueue(queueList);
+      } else {
+        setAudioQueue((prev) => (prev.some((q) => q.id === track.id) ? prev : [track, ...prev]));
+      }
+      setIsAudioPlaying(true);
+
+      setAudioLibrary((prev) => {
+        const nextRecent = [track, ...prev.recentlyPlayed.filter((t) => t.id !== track.id)].slice(0, 20);
+        const nextLib = { ...prev, recentlyPlayed: nextRecent };
+        persistAudioLibrary(nextLib);
+        return nextLib;
+      });
+    },
+    [persistAudioLibrary]
+  );
+
+  const handleToggleFavorite = useCallback(
+    (track: UniversalSearchResultItem) => {
+      setAudioLibrary((prev) => {
+        const exists = prev.favorites.some((t) => t.id === track.id);
+        const nextFavorites = exists
+          ? prev.favorites.filter((t) => t.id !== track.id)
+          : [track, ...prev.favorites].slice(0, 40);
+        const nextLib = { ...prev, favorites: nextFavorites };
+        persistAudioLibrary(nextLib);
+        return nextLib;
+      });
+    },
+    [persistAudioLibrary]
+  );
+
+  const handleAddToPlaylist = useCallback(
+    (track: UniversalSearchResultItem) => {
+      setAudioLibrary((prev) => {
+        if (prev.playlist.some((t) => t.id === track.id)) return prev;
+        const nextLib = { ...prev, playlist: [...prev.playlist, track].slice(0, 50) };
+        persistAudioLibrary(nextLib);
+        return nextLib;
+      });
+    },
+    [persistAudioLibrary]
+  );
+
+  const handleRemoveFromPlaylist = useCallback(
+    (trackId: string) => {
+      setAudioLibrary((prev) => {
+        const nextLib = {
+          ...prev,
+          playlist: prev.playlist.filter((t) => t.id !== trackId),
+        };
+        persistAudioLibrary(nextLib);
+        return nextLib;
+      });
+    },
+    [persistAudioLibrary]
+  );
+
+  const handleAudioNext = useCallback(() => {
+    if (!currentTrack || audioQueue.length === 0) return;
+    const idx = audioQueue.findIndex((t) => t.id === currentTrack.id);
+    const nextIdx = idx >= 0 ? (idx + 1) % audioQueue.length : 0;
+    const nextTrack = audioQueue[nextIdx];
+    if (nextTrack) {
+      handlePlayAudioTrack(nextTrack, audioQueue);
+    }
+  }, [currentTrack, audioQueue, handlePlayAudioTrack]);
+
+  const handleAudioPrev = useCallback(() => {
+    if (!currentTrack || audioQueue.length === 0) return;
+    const idx = audioQueue.findIndex((t) => t.id === currentTrack.id);
+    const prevIdx = idx >= 0 ? (idx - 1 + audioQueue.length) % audioQueue.length : 0;
+    const prevTrack = audioQueue[prevIdx];
+    if (prevTrack) {
+      handlePlayAudioTrack(prevTrack, audioQueue);
+    }
+  }, [currentTrack, audioQueue, handlePlayAudioTrack]);
+
+  const favoriteIds = React.useMemo(
+    () => new Set(audioLibrary.favorites.map((t) => t.id)),
+    [audioLibrary.favorites]
+  );
+  const playlistIds = React.useMemo(
+    () => new Set(audioLibrary.playlist.map((t) => t.id)),
+    [audioLibrary.playlist]
+  );
 
   // Initialize and validate guest used count
   useEffect(() => {
@@ -152,6 +318,17 @@ export default function App() {
 
   // 1. Firebase Auth State Listener
   useEffect(() => {
+    // Foreground push message listener
+    const unsubPush = onForegroundMessage((payload) => {
+      const title = payload?.notification?.title || "Sajjat Ai Notification";
+      const body = payload?.notification?.body || "New update received.";
+      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+        try {
+          new Notification(title, { body, icon: "/favicon.ico" });
+        } catch {}
+      }
+    });
+
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
         const profile = await getUserProfile(firebaseUser.uid);
@@ -174,11 +351,64 @@ export default function App() {
         syncUserProfileToDatabase(activeProfile);
       } else {
         setUser(null);
+        setVerifiedAdminUser(null);
       }
     });
 
     return () => unsubscribe();
   }, []);
+
+  // Direct Admin URL Guard (/admin, #admin, ?admin=1)
+  useEffect(() => {
+    const checkDirectAdminUrl = async () => {
+      if (typeof window === "undefined") return;
+      const path = window.location.pathname.toLowerCase();
+      const hash = window.location.hash.toLowerCase();
+      const params = new URLSearchParams(window.location.search);
+      const isDirectAdminTarget =
+        path === "/admin" ||
+        path.startsWith("/admin/") ||
+        hash === "#admin" ||
+        params.get("admin") === "1" ||
+        params.get("admin") === "true";
+
+      if (!isDirectAdminTarget) return;
+
+      try {
+        if (typeof (auth as any).authStateReady === "function") {
+          await (auth as any).authStateReady();
+        }
+      } catch {}
+
+      const verification = await verifyBackendAdminAccess();
+      if (verification.authorized && auth.currentUser) {
+        setShowAdminLogin(true);
+        window.history.replaceState({}, "", "/");
+      } else {
+        await reportUnauthorizedAdminAttempt(
+          "direct_url",
+          window.location.pathname + window.location.search + window.location.hash,
+          verification.reason || "Unauthorized direct admin URL access blocked."
+        );
+        setVerifiedAdminUser(null);
+        setAdminDeniedMessage(
+          `Access Denied: শুধুমাত্র অনুমোদিত অ্যাডমিন (${ADMIN_EMAIL}) অ্যাডমিন প্যানেলে প্রবেশ করতে পারবেন।`
+        );
+        window.history.replaceState({}, "", "/");
+      }
+    };
+
+    checkDirectAdminUrl();
+    window.addEventListener("popstate", checkDirectAdminUrl);
+    return () => window.removeEventListener("popstate", checkDirectAdminUrl);
+  }, []);
+
+  // Auto-dismiss Access Denied banner
+  useEffect(() => {
+    if (!adminDeniedMessage) return;
+    const t = setTimeout(() => setAdminDeniedMessage(null), 6500);
+    return () => clearTimeout(t);
+  }, [adminDeniedMessage]);
 
   // 2. Subscribe to Firebase RTDB Chat Sessions when user logs in
   useEffect(() => {
@@ -233,6 +463,9 @@ export default function App() {
     const unsubSettings = subscribeToSystemSettings((settings) => {
       if (settings) {
         setSystemSettings(settings);
+        if (settings.universalSearch && isAdmin(auth.currentUser?.email)) {
+          updateUniversalSearchConfigApi(settings.universalSearch).catch(() => {});
+        }
       }
     });
 
@@ -385,6 +618,32 @@ export default function App() {
       return updated;
     });
   }, [activeSessionId, user?.uid]);
+
+  // Persist Like / Dislike feedback on a bot message
+  const handleFeedbackMessage = useCallback((messageId: string, feedback: "like" | "dislike" | null) => {
+    const targetSessionId = activeSessionId || sessions[0]?.id;
+    if (!targetSessionId) return;
+
+    setSessions((prev) => {
+      const targetUid = user?.uid || getOrCreateGuestId();
+      const updated = prev.map((session) => {
+        if (session.id === targetSessionId) {
+          const newMessages = session.messages.map((m) =>
+            m.id === messageId ? { ...m, feedback } : m
+          );
+          const updatedSession = { ...session, messages: newMessages, updatedAt: Date.now() };
+          saveUserChatSession(targetUid, updatedSession);
+          return updatedSession;
+        }
+        return session;
+      });
+
+      if (!user?.uid) {
+        safeSaveGuestSessions(updated);
+      }
+      return updated;
+    });
+  }, [activeSessionId, sessions, user?.uid]);
 
   // Send Message Logic
   const handleSendMessage = async (
@@ -559,9 +818,37 @@ export default function App() {
       }
     }
 
-    // 3. Call Real Gemini AI Server API with selected model (under-the-hood)
+    // 3. Universal Internet, Video, Audio, Image, Document & Website Search Intelligence
+    const searchMasterEnabled =
+      systemSettings?.universalSearch?.enabled !== false &&
+      systemSettings?.webSearchEnabled !== false;
+
     setIsLoading(true);
     try {
+      if (!attachedFile && !isImageGenerationIntent(text) && searchMasterEnabled) {
+        const searchPayload = await runUniversalSearchApi({
+          query: text,
+          uid: user?.uid,
+          userName: user?.displayName,
+        });
+
+        if (searchPayload.success && searchPayload.intent !== "chat") {
+          finishWithBotMessage({
+            id: `msg_${Date.now()}_us`,
+            sender: "bot",
+            text:
+              searchPayload.summaryMarkdown ||
+              `"${text}" অনুসন্ধানের যাচাইকৃত ফলাফল নিচে দেওয়া হলো:`,
+            timestamp: Date.now(),
+            status: "sent",
+            model: "Sajjat AI Universal Search",
+            universalSearch: searchPayload,
+          });
+          return;
+        }
+      }
+
+      // 4. Call Real Gemini AI Server API with selected model (under-the-hood)
       const response = await sendChatMessage({
         message: text,
         history: updatedMessages,
@@ -576,7 +863,7 @@ export default function App() {
         text: response.reply,
         timestamp: Date.now(),
         status: "sent",
-        model: response.model ? response.model.replace("Gemini ", "Sajjat AI ") : "Sajjat AI",
+        model: response.model ? response.model.replace(/gemini\s*/gi, "Sajjat Ai ") : "Sajjat Ai",
         generatedImageUrl: response.generatedImageUrl,
         generatedImagePrompt: response.generatedImagePrompt,
       });
@@ -596,7 +883,11 @@ export default function App() {
     }
   };
 
-  const handleRetry = () => {
+  const handleRetry = (promptOverride?: string) => {
+    if (promptOverride && promptOverride.trim()) {
+      handleSendMessage(promptOverride);
+      return;
+    }
     if (lastUserMessage) {
       handleSendMessage(lastUserMessage.text, lastUserMessage.attachedFile);
     }
@@ -608,24 +899,37 @@ export default function App() {
       setUser(null);
       setSessions([]);
       setActiveSessionId(null);
-      setIsAdminViewOpen(false);
       setModalType("auth");
     } catch (error) {
       console.error("Logout error:", error);
     }
   };
 
+  const handleSecretAdminTrigger = useCallback(async () => {
+    if (!user) {
+      setAdminDeniedMessage(
+        "Access Denied: অ্যাডমিন প্যানেল খোলার জন্য প্রথমে ইউজার প্যানেলে লগইন করা বাধ্যতামূলক।"
+      );
+      return;
+    }
+
+    if (!isAdmin(user.email) || user.email.toLowerCase().trim() !== "sajjatmia17@gmail.com") {
+      await reportUnauthorizedAdminAttempt(
+        "logo_7_tap",
+        typeof window !== "undefined" ? window.location.pathname : "/",
+        `Signed-in non-admin user (${user.email}) triggered 7-tap admin sequence.`
+      );
+      setAdminDeniedMessage(
+        `Access Denied: "${user.email}" অ্যাডমিন অ্যাকাউন্ট নয়। শুধুমাত্র ${ADMIN_EMAIL} প্রবেশ করতে পারবেন।`
+      );
+      return;
+    }
+
+    setShowAdminLogin(true);
+  }, [user]);
+
   const toggleTheme = () => {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
-  };
-
-  // 7-Tap Handler from Logo
-  const handleOpenAdminTrigger = () => {
-    if (user && isAdmin(user.email)) {
-      setIsAdminViewOpen(true);
-    } else {
-      setModalType("admin_login");
-    }
   };
 
   return (
@@ -634,17 +938,18 @@ export default function App() {
         theme === "dark" ? "bg-slate-950 text-slate-100" : "bg-slate-100 text-slate-900"
       }`}
     >
-      {/* Header with clean Sajjat AI logo and settings trigger & 7-Tap Admin Access */}
+      {/* Header with clean Sajjat AI logo, live call, and controls */}
       <Header
         user={user}
         unreadNotifCount={unreadNotifCount}
         onOpenModal={(type) => setModalType(type)}
         onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
         onNewChat={handleNewChat}
-        onOpenAdmin={handleOpenAdminTrigger}
+        onStartVoiceCall={() => setModalType("live_voice")}
         systemSettings={systemSettings}
         onOpenPremium={() => setShowPremiumModal(true)}
         onLogout={handleLogout}
+        onSecretAdminTrigger={handleSecretAdminTrigger}
       />
 
       {/* System Maintenance Banner when enabled by Admin */}
@@ -679,6 +984,7 @@ export default function App() {
             isLoading={isLoading}
             onSendPrompt={(prompt) => handleSendMessage(prompt)}
             onRetry={handleRetry}
+            onFeedbackMessage={handleFeedbackMessage}
             onOpenModal={(type) => setModalType(type)}
             user={user}
             onDeleteMessage={handleDeleteMessage}
@@ -686,13 +992,44 @@ export default function App() {
             selectedModel={selectedModel}
             activeSessionTitle={activeSession?.title}
             systemSettings={systemSettings}
+            onPlayAudioTrack={handlePlayAudioTrack}
+            onToggleFavorite={handleToggleFavorite}
+            onAddToPlaylist={handleAddToPlaylist}
+            favoriteIds={favoriteIds}
+            playlistIds={playlistIds}
+            activeTrackId={currentTrack?.id}
+            isAudioPlaying={isAudioPlaying}
+          />
+
+          <AudioPlayerDock
+            currentTrack={currentTrack}
+            queue={audioQueue}
+            isPlaying={isAudioPlaying}
+            onTogglePlay={() => setIsAudioPlaying((prev) => !prev)}
+            onSetIsPlaying={setIsAudioPlaying}
+            onSelectTrack={handlePlayAudioTrack}
+            onNext={handleAudioNext}
+            onPrev={handleAudioPrev}
+            onClosePlayer={() => {
+              setIsAudioPlaying(false);
+              setCurrentTrack(null);
+            }}
+            audioLibrary={audioLibrary}
+            onToggleFavorite={handleToggleFavorite}
+            onAddToPlaylist={handleAddToPlaylist}
+            onRemoveFromPlaylist={handleRemoveFromPlaylist}
+            downloadPermissionEnabled={
+              systemSettings?.universalSearch?.downloadPermissionEnabled !== false
+            }
           />
 
           <ChatInput
             onSendMessage={handleSendMessage}
             isLoading={isLoading}
             onOpenImageGenerator={() => setModalType("image_generator")}
+            onStartVoiceCall={() => setModalType("live_voice")}
             systemSettings={systemSettings}
+            aiCapabilities={aiCapabilities}
           />
         </main>
       </div>
@@ -774,25 +1111,16 @@ export default function App() {
         }}
       />
 
-      {/* Admin Login Modal (Triggered by 7 taps on Sajjat AI logo) */}
-      <AdminLoginModal
-        isOpen={modalType === "admin_login"}
+      {/* Live Voice Call Modal with Sajjat AI */}
+      <LiveVoiceModal
+        isOpen={modalType === "live_voice"}
         onClose={() => setModalType("none")}
-        onSuccess={(adminProfile) => {
-          setUser(adminProfile);
-          setModalType("none");
-          setIsAdminViewOpen(true);
+        selectedModel={selectedModel}
+        aiBrandName={systemSettings?.aiBrandName || "Sajjat AI"}
+        onSendToChat={(userText) => {
+          handleSendMessage(userText);
         }}
       />
-
-      {/* Complete Full-Screen Admin Panel */}
-      {isAdminViewOpen && user && isAdmin(user.email) && (
-        <AdminPanel
-          adminUser={user}
-          onClose={() => setIsAdminViewOpen(false)}
-          onLogout={handleLogout}
-        />
-      )}
 
       {/* Delete Confirmation Modal */}
       <DeleteConfirmModal
@@ -802,6 +1130,35 @@ export default function App() {
         title={deleteModalState.title}
         description={deleteModalState.description}
       />
+
+      {/* Verified Admin Login Modal (Locked strictly to sajjatmia17@gmail.com) */}
+      <AdminLoginModal
+        isOpen={showAdminLogin}
+        onClose={() => setShowAdminLogin(false)}
+        onSuccess={(adminUser) => {
+          setUser(adminUser);
+          setVerifiedAdminUser(adminUser);
+          setShowAdminLogin(false);
+        }}
+      />
+
+      {/* Verified Admin Panel Overlay */}
+      {verifiedAdminUser && isAdmin(verifiedAdminUser.email) && (
+        <AdminPanel
+          adminUser={verifiedAdminUser}
+          onClose={() => {
+            setVerifiedAdminUser(null);
+            refreshAiCapabilities();
+          }}
+          onLogout={async () => {
+            setVerifiedAdminUser(null);
+            await handleLogout();
+          }}
+        />
+      )}
+
+      {/* Premium Dark Web Push Notification Permission Popup */}
+      <WebPushPopup userUid={user?.uid} />
     </div>
   );
 }

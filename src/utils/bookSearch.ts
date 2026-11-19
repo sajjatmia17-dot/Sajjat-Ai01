@@ -63,8 +63,19 @@ export function searchBooks(rawQuery: string, books: BookItem[]): BookItem[] {
     return matched;
   }
 
-  // If the query is just a generic book search ("বই চাই", "সব বই", "বই লাইব্রেরি"), return all active books
-  if (isBookSearchQuery(q)) {
+  // Only return general library list when query is genuinely asking for the library catalog
+  const isGenericLibraryRequest = [
+    "সব বই",
+    "বইয়ের তালিকা",
+    "বইয়ের তালিকা",
+    "লাইব্রেরি",
+    "library",
+    "book list",
+    "all books",
+    "বইগুলো",
+  ].some((kw) => q.includes(kw));
+
+  if (isGenericLibraryRequest) {
     return activeBooks.slice(0, 5);
   }
 

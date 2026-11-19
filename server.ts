@@ -4,6 +4,40 @@ import http from "http";
 import dotenv from "dotenv";
 import { WebSocketServer, WebSocket } from "ws";
 import { GoogleGenAI, Modality, LiveServerMessage } from "@google/genai";
+import {
+  getPhoneControlStatus,
+  analyzeScreenWithGemini,
+  processPhoneVoiceCommand,
+} from "./server/phoneControlService";
+import {
+  executeUniversalSearch,
+  getUniversalSearchConfig,
+  updateUniversalSearchConfig,
+  getUniversalSearchAdminStats,
+  clearUniversalSearchLogs,
+  isSafePublicHttpUrl,
+  isOpenLicenseDownloadHost,
+} from "./server/universalSearchService";
+import {
+  requireAdminMiddleware,
+  verifyOptionalUserMiddleware,
+  recordAdminAudit,
+  getAdminAuditLogs,
+  verifyAdminPanelPasscode,
+  updateAdminPanelPasscode,
+  type AdminRequest,
+} from "./server/adminAuthService";
+import {
+  executeChatWithFallback,
+  listAdminProvidersMasked,
+  upsertAdminProvider,
+  deleteAdminProvider,
+  testAdminProviderPing,
+  getPublicAiCapabilities,
+  getProviderApiKey,
+  getProviderRecord,
+  setProviderLocked,
+} from "./server/aiProviderService";
 
 dotenv.config();
 
@@ -284,194 +318,246 @@ ${fileContext.slice(0, 300)}...
 আমি কীভাবে আপনাকে আরও গভীরভাবে সাহায্য করতে পারি?`;
 }
 
-// Admin Provider Keys store in server memory
-const serverProviderConfigs: Record<string, { apiKey: string; modelId: string; enabled: boolean }> = {
-  gemini: { apiKey: process.env.GEMINI_API_KEY || "", modelId: "gemini-3.6-flash", enabled: true },
-  fal: { apiKey: process.env.FAL_KEY || "952fbb38-5521-4bfc-afd5-e1893bc5e999:0870a1e510ea0cc55a72ffce676a5cf4", modelId: "fal-ai/flux/schnell", enabled: true },
-  grok: { apiKey: process.env.GROK_API_KEY || "", modelId: "grok-beta", enabled: false },
-  deepseek: { apiKey: process.env.DEEPSEEK_API_KEY || "", modelId: "deepseek-chat", enabled: false },
-  openrouter: { apiKey: process.env.OPENROUTER_API_KEY || "", modelId: "openai/gpt-4o-mini", enabled: false },
-  huggingface: { apiKey: process.env.HUGGINGFACE_API_KEY || "", modelId: "meta-llama/Llama-3.1-8B-Instruct", enabled: false },
-  cerebras: { apiKey: process.env.CEREBRAS_API_KEY || "", modelId: "llama3.1-8b", enabled: false },
-  cohere: { apiKey: process.env.COHERE_API_KEY || "", modelId: "command-r", enabled: false },
-  mistral: { apiKey: process.env.MISTRAL_API_KEY || "", modelId: "mistral-small-latest", enabled: false },
-  claude: { apiKey: process.env.CLAUDE_API_KEY || "", modelId: "claude-3-5-sonnet-20241022", enabled: false },
-};
-
-let serverActiveProvider = "gemini";
 let customSystemInstruction = "";
-let isFalKeyLocked = false; // Flag to skip Fal.ai if key is out of credits/locked
-
-// Helper to call OpenAI-compatible chat completion APIs (Grok, DeepSeek, OpenRouter, Cerebras, Mistral, HuggingFace)
-async function callOpenAICompatibleAPI(params: {
-  endpoint: string;
-  apiKey: string;
-  model: string;
-  messages: Array<{ role: string; content: any }>;
-  temperature?: number;
-  customHeaders?: Record<string, string>;
-}): Promise<{ reply: string }> {
-  const { endpoint, apiKey, model, messages, temperature = 0.7, customHeaders = {} } = params;
-
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      ...customHeaders,
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature,
-    }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`API Error (${res.status}): ${errText.slice(0, 300)}`);
-  }
-
-  const data = await res.json();
-  const reply = data.choices?.[0]?.message?.content || "";
-  return { reply };
-}
-
-// Helper to call Anthropic Claude API
-async function callClaudeAPI(params: {
-  apiKey: string;
-  model: string;
-  systemPrompt: string;
-  messages: Array<{ role: string; content: string }>;
-  temperature?: number;
-}): Promise<{ reply: string }> {
-  const { apiKey, model, systemPrompt, messages, temperature = 0.7 } = params;
-
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages,
-      temperature,
-    }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Claude API Error (${res.status}): ${errText.slice(0, 300)}`);
-  }
-
-  const data = await res.json();
-  const reply = data.content?.[0]?.text || "";
-  return { reply };
-}
-
-// Helper to call Cohere Chat API v2
-async function callCohereAPI(params: {
-  apiKey: string;
-  model: string;
-  systemPrompt: string;
-  messages: Array<{ role: string; content: string }>;
-}): Promise<{ reply: string }> {
-  const { apiKey, model, systemPrompt, messages } = params;
-
-  const formattedMessages = [
-    { role: "system", content: systemPrompt },
-    ...messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content })),
-  ];
-
-  const res = await fetch("https://api.cohere.com/v2/chat", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: formattedMessages,
-    }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Cohere API Error (${res.status}): ${errText.slice(0, 300)}`);
-  }
-
-  const data = await res.json();
-  const reply = data.message?.content?.[0]?.text || "";
-  return { reply };
-}
 
 // Health check
 app.get("/api/health", (req, res) => {
+  const caps = getPublicAiCapabilities();
   res.json({
     status: "ok",
-    service: "Sajjat AI Server",
+    service: "Sajjat Ai Server",
     version: "4.0",
-    activeProvider: serverActiveProvider,
+    activeProvider: caps.activeProviderId,
     timestamp: new Date().toISOString()
   });
 });
 
-// Admin Providers Status
-app.get("/api/admin/providers-status", (req, res) => {
+// Public non-secret AI capability descriptor (used to gate ChatInput attachments/features cleanly)
+app.get("/api/ai-capabilities", (_req, res) => {
+  return res.json(getPublicAiCapabilities());
+});
+
+// Verify Admin Authorization (Firebase ID Token + sajjatmia17@gmail.com + email_verified)
+app.get("/api/admin/verify", requireAdminMiddleware, (req: AdminRequest, res) => {
+  const admin = req.verifiedAdmin!;
+  recordAdminAudit({
+    action: "ADMIN_SESSION_VERIFIED",
+    status: "success",
+    actorEmail: admin.email,
+    actorUid: admin.uid,
+    ip: String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "unknown"),
+    userAgent: String(req.headers["user-agent"] || "").slice(0, 120),
+    path: "/api/admin/verify",
+    details: "Verified admin access via Firebase ID Token.",
+  });
+  return res.json({
+    authorized: true,
+    email: admin.email,
+    uid: admin.uid,
+    emailVerified: admin.emailVerified,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Verify Admin Panel Passcode (Requires BOTH verified sajjatmia17@gmail.com ID token AND server passcode)
+app.post("/api/admin/verify-passcode", requireAdminMiddleware, (req: AdminRequest, res) => {
+  const admin = req.verifiedAdmin!;
+  const passcode = typeof req.body?.passcode === "string" ? req.body.passcode : "";
+  const ip = String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "unknown");
+  const userAgent = String(req.headers["user-agent"] || "").slice(0, 120);
+
+  if (!verifyAdminPanelPasscode(passcode)) {
+    recordAdminAudit({
+      action: "ADMIN_PASSCODE_FAILED",
+      status: "denied",
+      actorEmail: admin.email,
+      actorUid: admin.uid,
+      ip,
+      userAgent,
+      path: "/api/admin/verify-passcode",
+      details: "Incorrect admin panel passcode entered.",
+    });
+    return res.status(403).json({
+      authorized: false,
+      error: "ভুল অ্যাডমিন প্যানেল পাসওয়ার্ড! সঠিক পাসওয়ার্ড দিয়ে আবার চেষ্টা করুন।",
+    });
+  }
+
+  recordAdminAudit({
+    action: "ADMIN_PASSCODE_VERIFIED",
+    status: "success",
+    actorEmail: admin.email,
+    actorUid: admin.uid,
+    ip,
+    userAgent,
+    path: "/api/admin/verify-passcode",
+    details: "Verified admin panel passcode after Firebase ID Token check.",
+  });
+
+  return res.json({
+    authorized: true,
+    passcodeVerified: true,
+    email: admin.email,
+    uid: admin.uid,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Change Admin Panel Passcode (Requires verified admin + valid current passcode)
+app.post("/api/admin/change-passcode", requireAdminMiddleware, (req: AdminRequest, res) => {
+  const admin = req.verifiedAdmin!;
+  const currentPasscode = typeof req.body?.currentPasscode === "string" ? req.body.currentPasscode : "";
+  const newPasscode = typeof req.body?.newPasscode === "string" ? req.body.newPasscode : "";
+
+  if (!verifyAdminPanelPasscode(currentPasscode)) {
+    return res.status(403).json({
+      success: false,
+      error: "বর্তমান অ্যাডমিন প্যানেল পাসওয়ার্ড সঠিক নয়।",
+    });
+  }
+
+  try {
+    updateAdminPanelPasscode(newPasscode);
+    recordAdminAudit({
+      action: "ADMIN_PASSCODE_UPDATED",
+      status: "success",
+      actorEmail: admin.email,
+      actorUid: admin.uid,
+      path: "/api/admin/change-passcode",
+      details: "Admin updated server-side admin panel passcode.",
+    });
+    return res.json({ success: true, message: "অ্যাডমিন প্যানেল পাসওয়ার্ড আপডেট করা হয়েছে।" });
+  } catch (err: any) {
+    return res.status(400).json({ success: false, error: err?.message || "পাসওয়ার্ড আপডেট ব্যর্থ হয়েছে।" });
+  }
+});
+
+// Log unauthorized direct /admin or 7-tap access attempts from client guard
+app.post("/api/admin/audit-attempt", async (req, res) => {
+  const optionalUser = await verifyOptionalUserMiddleware(req);
+  const trigger = typeof req.body?.trigger === "string" ? req.body.trigger.slice(0, 50) : "unknown";
+  recordAdminAudit({
+    action: `CLIENT_ADMIN_DENIED_${trigger.toUpperCase()}`,
+    status: "denied",
+    actorEmail: optionalUser?.email || String(req.body?.email || "guest"),
+    actorUid: optionalUser?.uid,
+    ip: String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "unknown"),
+    userAgent: String(req.headers["user-agent"] || "").slice(0, 120),
+    path: String(req.body?.path || "/admin").slice(0, 100),
+    details: String(req.body?.reason || "Unauthorized admin panel trigger attempt blocked.").slice(0, 200),
+  });
+  return res.status(403).json({
+    authorized: false,
+    error: "Access Denied: আপনি অনুমোদিত অ্যাডমিন নন।",
+  });
+});
+
+// Fetch server-side Admin Audit Logs (Strict Admin Only)
+app.get("/api/admin/audit-logs", requireAdminMiddleware, (req: AdminRequest, res) => {
+  const limit = Number(req.query.limit) || 100;
+  return res.json({
+    success: true,
+    logs: getAdminAuditLogs(limit),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// List All Masked Providers + Live Diagnostics (Strict Admin Only)
+app.get("/api/admin/providers", requireAdminMiddleware, (_req: AdminRequest, res) => {
+  return res.json({
+    success: true,
+    ...listAdminProvidersMasked(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Create or Update Built-in / Custom Provider (Strict Admin Only)
+app.post("/api/admin/providers", requireAdminMiddleware, (req: AdminRequest, res) => {
+  const body = req.body || {};
+  const saved = upsertAdminProvider({
+    ...body,
+    id: body.id || body.providerId,
+  });
+  if (body.systemInstruction !== undefined) {
+    customSystemInstruction = String(body.systemInstruction || "");
+  }
+  recordAdminAudit({
+    action: "ADMIN_PROVIDER_UPSERTED",
+    status: "success",
+    actorEmail: req.verifiedAdmin!.email,
+    actorUid: req.verifiedAdmin!.uid,
+    path: "/api/admin/providers",
+    details: `Saved provider "${saved.id}" (${saved.name}) priority=${saved.priority} enabled=${saved.enabled} active=${saved.active}`,
+  });
+  return res.json({
+    success: true,
+    provider: saved,
+    ...listAdminProvidersMasked(),
+  });
+});
+
+// Delete Custom Provider (Strict Admin Only)
+app.delete("/api/admin/providers/:id", requireAdminMiddleware, (req: AdminRequest, res) => {
+  const id = String(req.params.id || "").trim();
+  const result = deleteAdminProvider(id);
+  if (!result.deleted) {
+    return res.status(400).json({ success: false, error: result.error });
+  }
+  recordAdminAudit({
+    action: "ADMIN_PROVIDER_DELETED",
+    status: "success",
+    actorEmail: req.verifiedAdmin!.email,
+    actorUid: req.verifiedAdmin!.uid,
+    path: req.originalUrl,
+    details: `Deleted custom provider "${id}".`,
+  });
+  return res.json({
+    success: true,
+    ...listAdminProvidersMasked(),
+  });
+});
+
+// Admin Providers Status (Strict Admin Only - backward compatible)
+app.get("/api/admin/providers-status", requireAdminMiddleware, (_req: AdminRequest, res) => {
+  const masked = listAdminProvidersMasked();
   const result: Record<string, any> = {};
-  for (const [key, conf] of Object.entries(serverProviderConfigs)) {
-    result[key] = {
-      id: key,
-      hasKey: Boolean(conf.apiKey && conf.apiKey.length > 5),
-      maskedKey: conf.apiKey ? `${conf.apiKey.slice(0, 4)}...${conf.apiKey.slice(-4)}` : "",
-      modelId: conf.modelId,
-      enabled: conf.enabled,
-      active: serverActiveProvider === key
-    };
+  for (const p of masked.providers) {
+    result[p.id] = p;
   }
   res.json({
     status: "ok",
-    activeProvider: serverActiveProvider,
+    activeProvider: masked.activeProviderId,
     providers: result,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 });
 
-// Admin Save Provider Configuration
-app.post("/api/admin/save-provider", (req, res) => {
-  const { providerId, apiKey, modelId, enabled, active, systemInstruction } = req.body;
-  if (!providerId) {
+// Admin Save Provider Configuration (Strict Admin Only - backward compatible)
+app.post("/api/admin/save-provider", requireAdminMiddleware, (req: AdminRequest, res) => {
+  const { providerId, id, ...rest } = req.body || {};
+  const targetId = id || providerId;
+  if (!targetId) {
     return res.status(400).json({ error: "Provider ID আবশ্যক।" });
   }
+  if (rest.systemInstruction !== undefined) {
+    customSystemInstruction = String(rest.systemInstruction || "");
+  }
+  const saved = upsertAdminProvider({ id: targetId, ...rest });
 
-  if (!serverProviderConfigs[providerId]) {
-    serverProviderConfigs[providerId] = { apiKey: "", modelId: "", enabled: false };
-  }
-
-  if (apiKey !== undefined && typeof apiKey === "string") {
-    serverProviderConfigs[providerId].apiKey = apiKey.trim();
-  }
-  if (modelId) {
-    serverProviderConfigs[providerId].modelId = modelId.trim();
-  }
-  if (enabled !== undefined) {
-    serverProviderConfigs[providerId].enabled = Boolean(enabled);
-  }
-  if (active) {
-    serverActiveProvider = providerId;
-  }
-  if (systemInstruction !== undefined) {
-    customSystemInstruction = systemInstruction;
-  }
+  recordAdminAudit({
+    action: "ADMIN_PROVIDER_SAVED",
+    status: "success",
+    actorEmail: req.verifiedAdmin!.email,
+    actorUid: req.verifiedAdmin!.uid,
+    path: "/api/admin/save-provider",
+    details: `Updated provider "${saved.id}" (enabled=${saved.enabled}, active=${saved.active}).`,
+  });
 
   return res.json({
     success: true,
-    message: `${providerId} কনফিগারেশন সফলভাবে সার্ভারে সংরক্ষিত হয়েছে।`,
-    activeProvider: serverActiveProvider
+    message: `${saved.name} কনফিগারেশন সফলভাবে সার্ভারে সংরক্ষিত হয়েছে।`,
+    provider: saved,
+    activeProvider: listAdminProvidersMasked().activeProviderId,
   });
 });
 
@@ -513,148 +599,24 @@ app.get("/api/tts", async (req, res) => {
   }
 });
 
-// Admin Test Provider Connection (for all 9 providers)
-app.post("/api/admin/test-provider", async (req, res) => {
-  const startTime = Date.now();
-  const { providerId, apiKey: providedKey, modelId } = req.body;
-  const targetProvider = providerId || "gemini";
-  const conf = serverProviderConfigs[targetProvider] || { apiKey: "", modelId: "" };
-  const keyToUse = providedKey?.trim() || conf.apiKey || process.env.GEMINI_API_KEY;
-  const modelToUse = modelId || conf.modelId || "gemini-3.1-flash-lite";
+// Admin Test Provider Connection (Strict Admin Only)
+app.post("/api/admin/test-provider", requireAdminMiddleware, async (req: AdminRequest, res) => {
+  const body = req.body || {};
+  const result = await testAdminProviderPing({
+    providerId: body.providerId || body.id,
+    apiKey: body.apiKey,
+    baseUrl: body.baseUrl,
+    modelId: body.modelId,
+    apiType: body.apiType,
+    authMethod: body.authMethod,
+    customAuthHeaderName: body.customAuthHeaderName,
+  });
 
-  if (!keyToUse) {
-    return res.status(400).json({
-      success: false,
-      error: "কোনো API Key প্রদান করা হয়নি। অনুগ্রহ করে কী লিখুন।"
-    });
-  }
-
-  try {
-    let testReply = "";
-
-    if (targetProvider === "gemini") {
-      const ai = new GoogleGenAI({
-        apiKey: keyToUse,
-        httpOptions: { headers: { "User-Agent": "aistudio-build" } }
-      });
-      const response = await ai.models.generateContent({
-        model: modelToUse,
-        contents: [{ role: "user", parts: [{ text: "Hello! Reply with 'OK - Sajjat AI Gemini is operational.'" }] }],
-      });
-      testReply = response.text || "Gemini engine operational.";
-    } else if (targetProvider === "grok") {
-      const result = await callOpenAICompatibleAPI({
-        endpoint: "https://api.x.ai/v1/chat/completions",
-        apiKey: keyToUse,
-        model: modelToUse,
-        messages: [{ role: "user", content: "Ping! Reply with 'OK - Grok is operational.'" }]
-      });
-      testReply = result.reply;
-    } else if (targetProvider === "deepseek") {
-      const result = await callOpenAICompatibleAPI({
-        endpoint: "https://api.deepseek.com/chat/completions",
-        apiKey: keyToUse,
-        model: modelToUse,
-        messages: [{ role: "user", content: "Ping! Reply with 'OK - DeepSeek is operational.'" }]
-      });
-      testReply = result.reply;
-    } else if (targetProvider === "openrouter") {
-      const result = await callOpenAICompatibleAPI({
-        endpoint: "https://openrouter.ai/api/v1/chat/completions",
-        apiKey: keyToUse,
-        model: modelToUse,
-        messages: [{ role: "user", content: "Ping! Reply with 'OK - OpenRouter is operational.'" }],
-        customHeaders: {
-          "HTTP-Referer": "https://sajjat-ai.web.app",
-          "X-Title": "Sajjat AI"
-        }
-      });
-      testReply = result.reply;
-    } else if (targetProvider === "huggingface") {
-      const result = await callOpenAICompatibleAPI({
-        endpoint: `https://router.huggingface.co/hf-inference/v1/chat/completions`,
-        apiKey: keyToUse,
-        model: modelToUse,
-        messages: [{ role: "user", content: "Ping! Reply with 'OK - HuggingFace is operational.'" }]
-      });
-      testReply = result.reply;
-    } else if (targetProvider === "cerebras") {
-      const result = await callOpenAICompatibleAPI({
-        endpoint: "https://api.cerebras.ai/v1/chat/completions",
-        apiKey: keyToUse,
-        model: modelToUse,
-        messages: [{ role: "user", content: "Ping! Reply with 'OK - Cerebras is operational.'" }]
-      });
-      testReply = result.reply;
-    } else if (targetProvider === "mistral") {
-      const result = await callOpenAICompatibleAPI({
-        endpoint: "https://api.mistral.ai/v1/chat/completions",
-        apiKey: keyToUse,
-        model: modelToUse,
-        messages: [{ role: "user", content: "Ping! Reply with 'OK - Mistral is operational.'" }]
-      });
-      testReply = result.reply;
-    } else if (targetProvider === "cohere") {
-      const result = await callCohereAPI({
-        apiKey: keyToUse,
-        model: modelToUse,
-        systemPrompt: "You are a test ping agent.",
-        messages: [{ role: "user", content: "Ping! Reply with 'OK - Cohere is operational.'" }]
-      });
-      testReply = result.reply;
-    } else if (targetProvider === "claude") {
-      const result = await callClaudeAPI({
-        apiKey: keyToUse,
-        model: modelToUse,
-        systemPrompt: "You are a test ping agent.",
-        messages: [{ role: "user", content: "Ping! Reply with 'OK - Claude is operational.'" }]
-      });
-      testReply = result.reply;
-    } else if (targetProvider === "fal") {
-      const falResponse = await fetch("https://fal.run/fal-ai/flux/schnell", {
-        method: "POST",
-        headers: {
-          "Authorization": `Key ${keyToUse}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          prompt: "a tiny green dot",
-          image_size: "square",
-          sync_mode: true
-        })
-      });
-      if (!falResponse.ok) {
-        const errText = await falResponse.text();
-        throw new Error(`Fal.ai API error (${falResponse.status}): ${errText}`);
-      }
-      const data = await falResponse.json() as any;
-      if (data?.images?.[0]?.url) {
-        testReply = "OK - Fal.ai is operational. Image generated successfully.";
-      } else {
-        throw new Error("No image generated.");
-      }
-    } else {
-      testReply = "Provider tested successfully.";
-    }
-
-    const latency = Date.now() - startTime;
-    return res.json({
-      success: true,
-      provider: targetProvider,
-      model: modelToUse,
-      reply: testReply.slice(0, 150),
-      latencyMs: latency,
-      timestamp: new Date().toISOString()
-    });
-  } catch (err: any) {
-    console.error(`Provider test error for ${targetProvider}:`, err);
-    return res.status(500).json({
-      success: false,
-      provider: targetProvider,
-      error: err?.message || "কানেকশন টেস্ট ব্যর্থ হয়েছে। API Key এবং মডেল নাম পুনরায় যাচাই করুন।",
-      latencyMs: Date.now() - startTime
-    });
-  }
+  return res.status(result.success ? 200 : 500).json({
+    ...result,
+    provider: body.providerId || body.id,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 /**
@@ -752,21 +714,20 @@ async function incrementServerUserLimit(uid?: string): Promise<void> {
   }
 }
 
-// Chat endpoint
+// Chat endpoint (Priority-ordered server-side provider execution + automatic fallback)
 app.post("/api/chat", async (req, res) => {
   try {
-    let { 
-      message = "", 
+    let {
+      message = "",
       prompt = "",
       messages = [],
-      history = [], 
-      imageBase64, 
-      imageMimeType, 
-      fileContent, 
-      fileName, 
+      history = [],
+      imageBase64,
+      imageMimeType,
+      fileContent,
+      fileName,
       model,
-      customApiKey,
-      uid
+      uid,
     } = req.body || {};
 
     // Secure trusted server limit check
@@ -775,7 +736,6 @@ app.post("/api/chat", async (req, res) => {
       return res.status(403).json({ error: limitCheck.error });
     }
 
-    // Extract message from prompt or messages array if message is not explicitly set
     if (!message && prompt) {
       message = prompt;
     } else if (!message && Array.isArray(messages) && messages.length > 0) {
@@ -789,266 +749,62 @@ app.post("/api/chat", async (req, res) => {
       return res.status(400).json({ error: "মেসেজ, ছবি অথবা ফাইল দেওয়া আবশ্যক।" });
     }
 
-    // Determine which provider to use
-    const activeProvider = req.body?.provider || serverActiveProvider || "gemini";
-    const providerConfig = serverProviderConfigs[activeProvider] || serverProviderConfigs.gemini;
-    const activeKey = customApiKey || providerConfig.apiKey || process.env.GEMINI_API_KEY || "";
-    const chosenModel = model || providerConfig.modelId || "gemini-3.1-flash-lite";
-
     // Check if user is requesting to generate an image
     if (!imageBase64 && !fileContent && isImageGenerationIntent(message)) {
       try {
-        const imageResult = await generateAiImage(message, activeKey);
+        const imageResult = await generateAiImage(message, getProviderApiKey("gemini"));
+        await incrementServerUserLimit(uid);
         return res.json({
           reply: imageResult.caption || "আমি আপনার অনুরোধ অনুযায়ী আকর্ষণীয় একটি ছবি তৈরি করেছি! নিচে ছবিটি দেখুন।",
           generatedImageUrl: imageResult.imageUrl,
           generatedImagePrompt: imageResult.refinedPrompt || message,
-          model: `Sajjat AI (${imageResult.model || "gemini-3.1-flash-image"})`,
-          timestamp: new Date().toISOString()
+          model: `Sajjat Ai`,
+          timestamp: new Date().toISOString(),
         });
       } catch (imgErr: any) {
         console.warn("Direct image generation attempt warning:", imgErr?.message);
-        return res.json({
-          reply: `দুঃখিত, ছবিটি তৈরি করা সম্ভব হয়নি:\n\n${imgErr?.message || "Gemini Image Generation ত্রুটি"}`,
-          model: "Sajjat AI Assistant",
-          timestamp: new Date().toISOString()
+        return res.status(502).json({
+          error: imgErr?.message || "ছবি তৈরি করতে সমস্যা হয়েছে।",
         });
       }
     }
 
-    let responseText = "";
-    let usedModel = `Sajjat AI (${chosenModel})`;
+    const sysPrompt = customSystemInstruction
+      ? `${SAJJAT_AI_SYSTEM_INSTRUCTION}\n\nAdditional Admin Rules:\n${customSystemInstruction}`
+      : SAJJAT_AI_SYSTEM_INSTRUCTION;
 
-    // Process with Non-Gemini providers if selected
-    if (activeProvider !== "gemini" && activeKey && activeKey.trim().length > 5) {
-      try {
-        const sysPrompt = customSystemInstruction ? `${SAJJAT_AI_SYSTEM_INSTRUCTION}\n\nAdditional Admin Rules:\n${customSystemInstruction}` : SAJJAT_AI_SYSTEM_INSTRUCTION;
-        
-        let fullUserText = message;
-        if (fileContent && fileName) {
-          fullUserText = `[সংযুক্ত ফাইল: ${fileName}]\n\`\`\`\n${fileContent.slice(0, 10000)}\n\`\`\`\n\n${message || "দয়া করে উপরের ফাইলটি বিশ্লেষণ করে মতামত দিন।"}`;
-        }
-
-        const formattedMessages: Array<{ role: string; content: string }> = [
-          { role: "system", content: sysPrompt }
-        ];
-
-        if (Array.isArray(history) && history.length > 0) {
-          for (const item of history.slice(-6)) {
-            formattedMessages.push({
-              role: item.sender === "user" ? "user" : "assistant",
-              content: item.text || ""
-            });
-          }
-        }
-        formattedMessages.push({ role: "user", content: fullUserText });
-
-        if (activeProvider === "grok") {
-          const res = await callOpenAICompatibleAPI({
-            endpoint: "https://api.x.ai/v1/chat/completions",
-            apiKey: activeKey,
-            model: chosenModel,
-            messages: formattedMessages
-          });
-          responseText = res.reply;
-        } else if (activeProvider === "deepseek") {
-          const res = await callOpenAICompatibleAPI({
-            endpoint: "https://api.deepseek.com/chat/completions",
-            apiKey: activeKey,
-            model: chosenModel,
-            messages: formattedMessages
-          });
-          responseText = res.reply;
-        } else if (activeProvider === "openrouter") {
-          const res = await callOpenAICompatibleAPI({
-            endpoint: "https://openrouter.ai/api/v1/chat/completions",
-            apiKey: activeKey,
-            model: chosenModel,
-            messages: formattedMessages,
-            customHeaders: {
-              "HTTP-Referer": "https://sajjat-ai.web.app",
-              "X-Title": "Sajjat AI"
-            }
-          });
-          responseText = res.reply;
-        } else if (activeProvider === "huggingface") {
-          const res = await callOpenAICompatibleAPI({
-            endpoint: `https://router.huggingface.co/hf-inference/v1/chat/completions`,
-            apiKey: activeKey,
-            model: chosenModel,
-            messages: formattedMessages
-          });
-          responseText = res.reply;
-        } else if (activeProvider === "cerebras") {
-          const res = await callOpenAICompatibleAPI({
-            endpoint: "https://api.cerebras.ai/v1/chat/completions",
-            apiKey: activeKey,
-            model: chosenModel,
-            messages: formattedMessages
-          });
-          responseText = res.reply;
-        } else if (activeProvider === "mistral") {
-          const res = await callOpenAICompatibleAPI({
-            endpoint: "https://api.mistral.ai/v1/chat/completions",
-            apiKey: activeKey,
-            model: chosenModel,
-            messages: formattedMessages
-          });
-          responseText = res.reply;
-        } else if (activeProvider === "cohere") {
-          const res = await callCohereAPI({
-            apiKey: activeKey,
-            model: chosenModel,
-            systemPrompt: sysPrompt,
-            messages: formattedMessages
-          });
-          responseText = res.reply;
-        } else if (activeProvider === "claude") {
-          const claudeMessages = formattedMessages.filter(m => m.role !== "system");
-          const res = await callClaudeAPI({
-            apiKey: activeKey,
-            model: chosenModel,
-            systemPrompt: sysPrompt,
-            messages: claudeMessages
-          });
-          responseText = res.reply;
-        }
-      } catch (providerErr: any) {
-        console.warn(`Provider ${activeProvider} execution error, trying fallback:`, providerErr?.message);
-      }
+    const capabilities = getPublicAiCapabilities();
+    if (capabilities.enabledTextProvidersCount === 0) {
+      const offlineReply = generateSmartResponse(message, fileContent);
+      await incrementServerUserLimit(uid);
+      return res.json({
+        reply: offlineReply,
+        model: "Sajjat Ai Verified Core",
+        providerId: "local",
+        providerName: "Sajjat Ai Verified Core",
+        fallbackUsed: false,
+        timestamp: new Date().toISOString(),
+      });
     }
 
-    // Default to Gemini if responseText is not yet obtained
-    if (!responseText && activeKey && activeKey.trim().length > 5) {
-      try {
-        const ai = new GoogleGenAI({ 
-          apiKey: activeKey.trim(),
-          httpOptions: {
-            headers: {
-              'User-Agent': 'aistudio-build',
-            }
-          }
-        });
-
-        // Prepare contents array for Gemini
-        const contents: any[] = [];
-
-        // Prior conversation history
-        if (Array.isArray(history) && history.length > 0) {
-          const recentHistory = history.slice(-6); // Keep last 6 turns for optimal token balance
-          for (const item of recentHistory) {
-            if (item.sender === "user") {
-              contents.push({
-                role: "user",
-                parts: [{ text: item.text || "" }]
-              });
-            } else if (item.sender === "bot" || item.sender === "model") {
-              contents.push({
-                role: "model",
-                parts: [{ text: item.text || "" }]
-              });
-            }
-          }
-        }
-
-        // Current message parts
-        const currentParts: any[] = [];
-
-        // Attached image
-        if (imageBase64) {
-          const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, "");
-          currentParts.push({
-            inlineData: {
-              data: base64Data,
-              mimeType: imageMimeType || "image/jpeg"
-            }
-          });
-        }
-
-        // Attached file text content
-        let fullUserText = message;
-        if (fileContent && fileName) {
-          fullUserText = `[সংযুক্ত ফাইল: ${fileName}]\n\`\`\`\n${fileContent.slice(0, 10000)}\n\`\`\`\n\n${message || "দয়া করে উপরের ফাইলটি বিশ্লেষণ করে মতামত দিন।"}`;
-        }
-
-        if (fullUserText) {
-          currentParts.push({ text: fullUserText });
-        }
-
-        contents.push({
-          role: "user",
-          parts: currentParts
-        });
-
-        // Resilient model list to automatically handle 503 high demand spikes and rate limits
-        const baseModels = [
-          "gemini-3.6-flash",
-          "gemini-3.8-flash",
-          "gemini-3.1-flash-lite"
-        ];
-
-        // If user specified a preferred model, prioritize it first
-        const modelsToTry: string[] = [];
-        if (model && baseModels.includes(model)) {
-          modelsToTry.push(model);
-          for (const m of baseModels) {
-            if (m !== model) modelsToTry.push(m);
-          }
-        } else {
-          modelsToTry.push(...baseModels);
-        }
-
-        for (const modelName of modelsToTry) {
-          try {
-            const response = await ai.models.generateContent({
-              model: modelName,
-              contents: contents,
-              config: {
-                systemInstruction: SAJJAT_AI_SYSTEM_INSTRUCTION,
-                temperature: 0.7,
-              }
-            });
-
-            if (response && response.text) {
-              responseText = response.text;
-              usedModel = `Sajjat AI (${modelName})`;
-              break;
-            }
-          } catch (modelErr: any) {
-            const errMsg = modelErr?.message || String(modelErr);
-            console.warn(`Gemini Model ${modelName} encountered issue:`, errMsg);
-            // If 503 or unavailable or quota, seamlessly continue loop to next model
-            continue;
-          }
-        }
-      } catch (genAiInitErr: any) {
-        console.warn("Gemini client initialization warning:", genAiInitErr?.message);
-      }
-    }
-
-    // Fallback if Gemini key is not provided or quota exceeded
-    if (!responseText) {
-      responseText = generateSmartResponse(message, fileContent);
-      usedModel = "Sajjat AI Verified Core";
-    }
-
-    // Securely increment user limit on server
-    await incrementServerUserLimit(uid);
-
-    return res.json({
-      reply: responseText,
-      model: usedModel,
-      timestamp: new Date().toISOString()
+    const result = await executeChatWithFallback({
+      message,
+      history: Array.isArray(history) ? history : [],
+      imageBase64,
+      imageMimeType,
+      fileContent,
+      fileName,
+      requestedModel: model,
+      preferredProviderId: req.body?.provider,
+      systemInstruction: sysPrompt,
     });
 
+    await incrementServerUserLimit(uid);
+    return res.json(result);
   } catch (error: any) {
     console.error("Chat API error:", error);
-    // Even on error, return friendly fallback response
-    const fallbackText = generateSmartResponse(req.body?.message || "", req.body?.fileContent);
-    return res.json({
-      reply: fallbackText,
-      model: "Sajjat AI Assistant",
-      timestamp: new Date().toISOString()
+    return res.status(502).json({
+      error: error?.message || "AI Provider থেকে উত্তর পাওয়া যায়নি। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।",
     });
   }
 });
@@ -1302,20 +1058,160 @@ let serverSystemSettings = {
   adminPassword: ""
 };
 
-// System Settings API endpoints for Admin Panel synchronization
-app.get("/api/system-settings", (req, res) => {
-  return res.json(serverSystemSettings);
+// System Settings API endpoints (never leak adminPassword; mutations require Admin JWT)
+app.get("/api/system-settings", (_req, res) => {
+  const { adminPassword: _omitted, ...safeSettings } = serverSystemSettings;
+  return res.json(safeSettings);
 });
 
-app.post("/api/system-settings", (req, res) => {
+app.post("/api/system-settings", requireAdminMiddleware, (req: AdminRequest, res) => {
   if (req.body && typeof req.body === "object") {
+    const { adminPassword: _ignoredPassword, ...safeUpdates } = req.body;
     serverSystemSettings = {
       ...serverSystemSettings,
-      ...req.body
+      ...safeUpdates,
+      adminPassword: "",
     };
+    if (req.body.universalSearch && typeof req.body.universalSearch === "object") {
+      updateUniversalSearchConfig(req.body.universalSearch);
+    }
+    recordAdminAudit({
+      action: "SYSTEM_SETTINGS_UPDATED",
+      status: "success",
+      actorEmail: req.verifiedAdmin!.email,
+      actorUid: req.verifiedAdmin!.uid,
+      path: "/api/system-settings",
+      details: `Updated keys: ${Object.keys(safeUpdates).slice(0, 12).join(", ")}`,
+    });
   }
-  return res.json({ success: true, settings: serverSystemSettings });
+  const { adminPassword: _omitted, ...safeSettings } = serverSystemSettings;
+  return res.json({ success: true, settings: safeSettings });
 });
+
+// ----------------------------------------------------
+// 🔔 Server Notifications Store & Endpoints
+// ----------------------------------------------------
+interface ServerNotificationItem {
+  id: string;
+  title: string;
+  message: string;
+  type: "announcement" | "update" | "alert" | "feature";
+  target: "all" | "user";
+  targetUserId?: string;
+  targetUserEmail?: string;
+  senderName?: string;
+  createdAt: number;
+  expiresAt: number | null;
+  expirationOption?: string;
+  readBy?: Record<string, boolean>;
+}
+
+let serverNotifications: ServerNotificationItem[] = [
+  {
+    id: "notif_welcome_sajjat_ai",
+    title: "Sajjat AI-তে স্বাগতম!",
+    message: "মানুষের সেবায় নিবেদিত সর্বাধুনিক সুপার ইন্টেলিজেন্ট বাংলা এআই সহকারী। যেকোনো প্রশ্ন, গণিত, বিজ্ঞান বা কোডিং সমস্যা নিয়ে আলোচনা করুন।",
+    type: "announcement",
+    target: "all",
+    senderName: "Sajjat Mia (Admin)",
+    createdAt: Date.now() - 3600000,
+    expiresAt: null,
+    expirationOption: "none",
+    readBy: {}
+  }
+];
+
+// Notifications endpoints
+app.get("/api/notifications", (req, res) => {
+  // Return all notifications sorted newest first
+  return res.json({ success: true, notifications: serverNotifications });
+});
+
+app.post("/api/notifications", requireAdminMiddleware, (req: AdminRequest, res) => {
+  try {
+    const { 
+      title, 
+      message, 
+      type = "announcement", 
+      target = "all", 
+      targetUserId, 
+      targetUserEmail, 
+      senderName = "Sajjat Mia (Admin)", 
+      expirationOption = "none",
+      expiresAt: customExpiresAt
+    } = req.body || {};
+
+    if (!title || !message) {
+      return res.status(400).json({ error: "Title and message are required" });
+    }
+
+    const now = Date.now();
+    let expiresAt: number | null = customExpiresAt || null;
+    if (!expiresAt) {
+      if (expirationOption === "1d") expiresAt = now + 24 * 60 * 60 * 1000;
+      else if (expirationOption === "3d") expiresAt = now + 3 * 24 * 60 * 60 * 1000;
+      else if (expirationOption === "7d") expiresAt = now + 7 * 24 * 60 * 60 * 1000;
+      else if (expirationOption === "30d") expiresAt = now + 30 * 24 * 60 * 60 * 1000;
+    }
+
+    const notifId = req.body.id || `notif_${now}_${Math.random().toString(36).substring(2, 6)}`;
+    const newNotif: ServerNotificationItem = {
+      id: notifId,
+      title: String(title).trim(),
+      message: String(message).trim(),
+      type,
+      target,
+      targetUserId,
+      targetUserEmail,
+      senderName,
+      createdAt: req.body.createdAt || now,
+      expiresAt,
+      expirationOption,
+      readBy: req.body.readBy || {}
+    };
+
+    serverNotifications = [newNotif, ...serverNotifications.filter(n => n.id !== notifId)].slice(0, 100);
+    recordAdminAudit({
+      action: "ADMIN_NOTIFICATION_SENT",
+      status: "success",
+      actorEmail: req.verifiedAdmin!.email,
+      actorUid: req.verifiedAdmin!.uid,
+      path: "/api/notifications",
+      details: `Notification "${newNotif.title}" target=${target}`,
+    });
+    return res.json({ success: true, notification: newNotif, notifications: serverNotifications });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Failed to save notification" });
+  }
+});
+
+app.delete("/api/notifications/:id", requireAdminMiddleware, (req: AdminRequest, res) => {
+  const { id } = req.params;
+  serverNotifications = serverNotifications.filter(n => n.id !== id);
+  recordAdminAudit({
+    action: "ADMIN_NOTIFICATION_DELETED",
+    status: "success",
+    actorEmail: req.verifiedAdmin!.email,
+    actorUid: req.verifiedAdmin!.uid,
+    path: req.originalUrl,
+    details: `Deleted notification id=${id}`,
+  });
+  return res.json({ success: true, notifications: serverNotifications });
+});
+
+app.post("/api/notifications/:id/read", (req, res) => {
+  const { id } = req.params;
+  const { uid } = req.body || {};
+  if (uid) {
+    const target = serverNotifications.find(n => n.id === id);
+    if (target) {
+      if (!target.readBy) target.readBy = {};
+      target.readBy[uid] = true;
+    }
+  }
+  return res.json({ success: true });
+});
+
 
 // Comprehensive Bengali visual concept & vocabulary dictionary for instant translation
 const BENGALI_VISUAL_MAP: Record<string, string> = {
@@ -1497,10 +1393,10 @@ async function generateAiImage(
   apiKey?: string,
   options: { aspectRatio?: string; style?: string; engine?: string } = {}
 ) {
-  const activeKey = apiKey?.trim() || serverProviderConfigs.gemini?.apiKey?.trim() || process.env.GEMINI_API_KEY?.trim() || "";
+  const activeKey = apiKey?.trim() || getProviderApiKey("gemini") || process.env.GEMINI_API_KEY?.trim() || "";
 
   if (!activeKey) {
-    throw new Error("Gemini API Key পাওয়া যায়নি। দয়া করে সেটিংস বা এডমিন প্যানেলে আপনার Gemini API Key যুক্ত করুন।");
+    throw new Error("ইমেজ জেনারেশন ইঞ্জিন কনফিগার করা নেই। অনুগ্রহ করে অ্যাডমিন প্যানেলে API Key যুক্ত করুন।");
   }
 
   const ai = new GoogleGenAI({
@@ -1517,7 +1413,7 @@ async function generateAiImage(
 
   const containsBengali = /[\u0980-\u09FF]/.test(userPrompt);
   if (containsBengali || userPrompt.trim().length > 0) {
-    const translationModels = ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite"];
+    const translationModels = ["gemini-4-hydrogen", "gemini-3.1-flash-lite"];
     let translatedText = "";
     
     for (const modelName of translationModels) {
@@ -1548,9 +1444,6 @@ Output ONLY the translated English description, with no explanation, no markdown
         const refineRes = await ai.models.generateContent({
           model: modelName,
           contents: [{ role: "user", parts: [{ text: translationPrompt }] }],
-          config: {
-            temperature: 0.1,
-          },
         });
 
         if (refineRes.text && refineRes.text.trim().length > 3) {
@@ -1636,11 +1529,12 @@ Output ONLY the translated English description, with no explanation, no markdown
     imageSize = { width: 768, height: 1024 };
   }
 
-  // --- PRIORITIZE FAL.AI FOR IMAGE GENERATION ---
-  if (!isFalKeyLocked && (serverProviderConfigs.fal?.enabled !== false)) {
+  // --- PRIORITIZE FAL.AI ONLY WHEN A VALID KEY IS CONFIGURED ---
+  const falRecord = getProviderRecord("fal");
+  const falKey = (falRecord?.apiKey || process.env.FAL_KEY || "").trim();
+  if (!falRecord?.isLocked && falRecord?.enabled !== false && falKey.length > 5) {
     try {
-      const falKey = serverProviderConfigs.fal?.apiKey || process.env.FAL_KEY || "952fbb38-5521-4bfc-afd5-e1893bc5e999:0870a1e510ea0cc55a72ffce676a5cf4";
-      const falModel = serverProviderConfigs.fal?.modelId || "fal-ai/flux/schnell";
+      const falModel = falRecord?.modelId || "fal-ai/flux/schnell";
       console.log(`[FAL-AI Image Gen] Requesting image via ${falModel} for prompt: "${visualPrompt}" with size: ${JSON.stringify(imageSize)}`);
 
       const falResponse = await fetch(`https://fal.run/${falModel}`, {
@@ -1657,7 +1551,7 @@ Output ONLY the translated English description, with no explanation, no markdown
       });
 
       if (falResponse.ok) {
-        const falData = await falResponse.ok ? await falResponse.json() as any : null;
+        const falData = await falResponse.json() as any;
         const generatedImage = falData?.images?.[0];
 
         if (generatedImage?.url) {
@@ -1680,17 +1574,22 @@ Output ONLY the translated English description, with no explanation, no markdown
         }
       } else {
         const errText = await falResponse.text();
-        console.warn(`[FAL-AI Image Gen] Fal.ai API error (status: ${falResponse.status}): ${errText}`);
-        if (falResponse.status === 403 || errText.includes("TOP_UP") || errText.includes("locked")) {
-          console.warn("[FAL-AI Image Gen] Fal.ai key requires top-up or is locked. Disabling Fal.ai to bypass further errors and use fast fallback.");
-          isFalKeyLocked = true;
+        if (
+          falResponse.status === 401 ||
+          falResponse.status === 403 ||
+          errText.includes("TOP_UP") ||
+          errText.includes("locked") ||
+          errText.includes("invalid key")
+        ) {
+          setProviderLocked("fal", true);
+          console.log(`[FAL-AI Image Gen] Fal.ai key unavailable (${falResponse.status}). Disabling Fal.ai for this session and switching to render fallback.`);
+        } else {
+          console.log(`[FAL-AI Image Gen] Fal.ai unavailable (status: ${falResponse.status}). Switching to render fallback.`);
         }
       }
-    } catch (falErr) {
-      console.error("[FAL-AI Image Gen] Connection exception:", falErr);
+    } catch {
+      console.log("[FAL-AI Image Gen] Fal.ai unreachable. Switching to render fallback.");
     }
-  } else {
-    console.log("[FAL-AI Image Gen] Fal.ai is currently marked as locked or out of credits. Bypassing to use Gemini/Pollinations fallback instantly.");
   }
 
   // 3. Generate image using Google GenAI native models (gemini-3.1-flash-image, imagen-3.0-generate-002, etc.)
@@ -1923,7 +1822,7 @@ app.post("/api/generate-image", async (req, res) => {
       return res.status(400).json({ error: "প্রম্পট দেওয়া আবশ্যক।" });
     }
 
-    const activeKey = req.body?.customApiKey || serverProviderConfigs.gemini?.apiKey || process.env.GEMINI_API_KEY;
+    const activeKey = req.body?.customApiKey || getProviderApiKey("gemini") || process.env.GEMINI_API_KEY;
     const result = await generateAiImage(prompt, activeKey, { 
       aspectRatio, 
       style, 
@@ -1962,9 +1861,9 @@ app.post("/api/edit-image", async (req, res) => {
       return res.status(400).json({ success: false, error: "এডিটিং ইন্সট্রাকশন দেওয়া আবশ্যক।" });
     }
 
-    const activeKey = customApiKey?.trim() || serverProviderConfigs.gemini?.apiKey?.trim() || process.env.GEMINI_API_KEY?.trim() || "";
+    const activeKey = customApiKey?.trim() || getProviderApiKey("gemini") || process.env.GEMINI_API_KEY?.trim() || "";
     if (!activeKey) {
-      return res.status(400).json({ success: false, error: "Gemini API Key পাওয়া যায়নি। দয়া করে সেটিংস বা এডমিন প্যানেলে আপনার Gemini API Key যুক্ত করুন।" });
+      return res.status(400).json({ success: false, error: "ইমেজ এডিটিং ইঞ্জিন কনফিগার করা নেই। অনুগ্রহ করে অ্যাডমিন প্যানেলে API Key যুক্ত করুন।" });
     }
 
     const ai = new GoogleGenAI({
@@ -2189,7 +2088,402 @@ app.get("/Sajjat_AI.html", (req, res) => {
   res.sendFile(filePath);
 });
 
+// ----------------------------------------------------
+// 📱 Sajjat Ai Phone Control API Endpoints & Live WS
+// ----------------------------------------------------
+app.get("/api/phone-control/status", (_req, res) => {
+  return res.json(getPhoneControlStatus("node-server"));
+});
 
+app.post("/api/phone-control/analyze", async (req, res) => {
+  try {
+    const result = await analyzeScreenWithGemini({
+      imageBase64: req.body?.imageBase64 || "",
+      mimeType: req.body?.mimeType || "image/jpeg",
+      question: req.body?.question || "",
+      language: req.body?.language === "en" ? "en" : "bn",
+    });
+    const status =
+      result.success ? 200 : result.errorCode === "INVALID_INPUT" ? 400 : result.errorCode === "MISSING_API_KEY" ? 503 : 500;
+    return res.status(status).json(result);
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      errorCode: "API_ERROR",
+      error: err?.message || "স্ক্রিন বিশ্লেষণ সার্ভার ত্রুটি।",
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+app.post("/api/phone-control/voice", async (req, res) => {
+  try {
+    const result = await processPhoneVoiceCommand({
+      text: req.body?.text || "",
+      language: req.body?.language === "en" ? "en" : "bn",
+      hasScreenShare: Boolean(req.body?.hasScreenShare),
+      history: Array.isArray(req.body?.history) ? req.body.history : [],
+    });
+    const status =
+      result.success ? 200 : result.errorCode === "INVALID_INPUT" ? 400 : result.errorCode === "MISSING_API_KEY" ? 503 : 500;
+    return res.status(status).json(result);
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      errorCode: "API_ERROR",
+      error: err?.message || "ভয়েস নির্দেশ সার্ভার ত্রুটি।",
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// ----------------------------------------------------
+// 🌐 Sajjat AI Universal Search, Audio & Video Intelligence API
+// ----------------------------------------------------
+app.post("/api/universal-search/query", async (req, res) => {
+  try {
+    const { query = "", forcedCategory, uid, userName } = req.body || {};
+    if (!query || typeof query !== "string" || !query.trim()) {
+      return res.status(400).json({ error: "অনুসন্ধানের জন্য প্রশ্ন বা কীওয়ার্ড দেওয়া আবশ্যক।" });
+    }
+
+    const limitCheck = await validateAndEnforceUserLimit(uid);
+    if (!limitCheck.allowed) {
+      return res.status(403).json({ error: limitCheck.error });
+    }
+
+    const payload = await executeUniversalSearch({
+      query: query.trim(),
+      forcedCategory,
+      uid,
+      userName,
+    });
+
+    if (payload.intent !== "chat") {
+      await incrementServerUserLimit(uid);
+    }
+
+    return res.json({
+      success: true,
+      ...payload,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    console.error("[Universal Search] Query error:", err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || "ইউনিভার্সাল সার্চে সমস্যা হয়েছে।",
+    });
+  }
+});
+
+app.get("/api/universal-search/admin/stats", requireAdminMiddleware, (_req: AdminRequest, res) => {
+  return res.json({
+    success: true,
+    ...getUniversalSearchAdminStats(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.post("/api/universal-search/admin/config", requireAdminMiddleware, (req: AdminRequest, res) => {
+  const updated = updateUniversalSearchConfig(req.body || {});
+  serverSystemSettings = {
+    ...serverSystemSettings,
+    ...(req.body?.webSearchEnabled !== undefined ? { webSearchEnabled: Boolean(req.body.webSearchEnabled) } : {}),
+  };
+  recordAdminAudit({
+    action: "UNIVERSAL_SEARCH_CONFIG_UPDATED",
+    status: "success",
+    actorEmail: req.verifiedAdmin!.email,
+    actorUid: req.verifiedAdmin!.uid,
+    path: "/api/universal-search/admin/config",
+    details: `Updated universal search config keys: ${Object.keys(req.body || {}).join(", ")}`,
+  });
+  return res.json({
+    success: true,
+    config: updated,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.post("/api/universal-search/admin/clear-logs", requireAdminMiddleware, (req: AdminRequest, res) => {
+  clearUniversalSearchLogs();
+  recordAdminAudit({
+    action: "UNIVERSAL_SEARCH_LOGS_CLEARED",
+    status: "success",
+    actorEmail: req.verifiedAdmin!.email,
+    actorUid: req.verifiedAdmin!.uid,
+    path: "/api/universal-search/admin/clear-logs",
+    details: "Cleared universal search history and error logs.",
+  });
+  return res.json({ success: true });
+});
+
+app.get("/api/universal-search/download", async (req, res) => {
+  const rawUrl = String(req.query.url || "");
+  const fileName = String(req.query.name || "sajjat-ai-media").replace(/[^a-zA-Z0-9._-]/g, "_");
+  const config = getUniversalSearchConfig();
+
+  if (!config.downloadPermissionEnabled) {
+    return res.status(403).json({
+      error: "অ্যাডমিন প্যানেল থেকে ডাউনলোড অনুমতি বর্তমানে বন্ধ রাখা হয়েছে।",
+    });
+  }
+
+  if (!rawUrl || !isSafePublicHttpUrl(rawUrl) || !isOpenLicenseDownloadHost(rawUrl)) {
+    return res.status(403).json({
+      error: "কপিরাইট ও লাইসেন্স নীতিমালা অনুযায়ী শুধুমাত্র অনুমোদিত ওপেন-লাইসেন্স ফাইল ডাউনলোড করা যাবে।",
+    });
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 18000);
+    const upstream = await fetch(rawUrl, {
+      signal: controller.signal,
+      headers: { "User-Agent": "SajjatAI-Downloader/1.0" },
+    });
+    clearTimeout(timer);
+
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({ error: `উৎস থেকে ডাউনলোড ব্যর্থ হয়েছে (HTTP ${upstream.status})` });
+    }
+
+    const contentType = upstream.headers.get("content-type") || "application/octet-stream";
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.setHeader("Content-Length", buffer.length);
+    return res.send(buffer);
+  } catch (err: any) {
+    return res.status(502).json({
+      error: err?.message || "ফাইল ডাউনলোড করতে সংযোগ ব্যর্থ হয়েছে।",
+    });
+  }
+});
+
+const phoneLiveWss = new WebSocketServer({ noServer: true });
+
+server.on("upgrade", (request, socket, head) => {
+  try {
+    const pathname = new URL(request.url || "/", "http://localhost").pathname;
+    if (pathname === "/ws/phone-live") {
+      phoneLiveWss.handleUpgrade(request, socket, head, (ws) => {
+        phoneLiveWss.emit("connection", ws, request);
+      });
+    }
+  } catch {
+    // Ignore malformed upgrade URLs
+  }
+});
+
+phoneLiveWss.on("connection", async (clientWs: WebSocket, request) => {
+  const sessionId = `live_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const apiKey = getProviderApiKey("gemini") || (process.env.GEMINI_API_KEY || "").trim();
+  if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
+    clientWs.send(
+      JSON.stringify({
+        type: "error",
+        errorCode: "MISSING_API_KEY",
+        message: "সার্ভারে GEMINI_API_KEY সেট করা নেই। এনভায়রনমেন্ট ভেরিয়েবল কনফিগার করুন।",
+      })
+    );
+    clientWs.close();
+    return;
+  }
+
+  let liveSession: any = null;
+  let isClosed = false;
+
+  clientWs.on("close", () => {
+    isClosed = true;
+    try {
+      liveSession?.close();
+    } catch {
+      // ignore close errors
+    }
+    liveSession = null;
+  });
+
+  const reqUrl = new URL(request?.url || "/ws/phone-live", "http://localhost");
+  const mode = reqUrl.searchParams.get("mode") || "phone";
+  const allowedVoices = new Set(["Puck", "Charon", "Kore", "Fenrir", "Zephyr"]);
+  const configuredVoice = serverSystemSettings.liveVoiceName || "Zephyr";
+  const voiceName = allowedVoices.has(configuredVoice) ? configuredVoice : "Zephyr";
+
+  const systemInstruction =
+    mode === "call"
+      ? `You are "Sajjat AI", a friendly, intelligent real-time voice assistant created and owned by Sajjat Mia.
+Speak naturally and clearly in Bengali (বাংলা) by default, and seamlessly speak English whenever the user speaks in English.
+Keep spoken replies concise, warm, and conversational (like a real phone call). Never say you are Gemini or Google; your name is always Sajjat AI.`
+      : `You are Sajjat AI Phone Control Assistant (created by Sajjat Mia). Speak naturally in Bengali (or English if the user speaks English). Help the user understand what is on their screen, guide step-by-step clicks, and give honest guidance on opening apps or finding phone settings without claiming direct access to private Android system internals.`;
+
+  const connectAttempts: Array<{ apiVersion?: string; model: string }> = [
+    { model: "gemini-3.8-live" },
+    { apiVersion: "v1beta", model: "gemini-3.8-live" },
+    { apiVersion: "v1alpha", model: "gemini-3.8-live" },
+  ];
+
+  let lastLiveErr: any = null;
+  let connectedModel = "";
+
+  for (const attempt of connectAttempts) {
+    if (isClosed || clientWs.readyState !== WebSocket.OPEN) break;
+    let attemptErrored = false;
+    try {
+      const ai = new GoogleGenAI({
+        apiKey,
+        ...(attempt.apiVersion ? { apiVersion: attempt.apiVersion } : {}),
+        httpOptions: {
+          ...(attempt.apiVersion ? { apiVersion: attempt.apiVersion } : {}),
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
+        },
+      });
+
+      const session = await ai.live.connect({
+        model: attempt.model,
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName } },
+          },
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+          systemInstruction,
+        },
+        callbacks: {
+          onmessage: (message: LiveServerMessage) => {
+            if (isClosed || clientWs.readyState !== WebSocket.OPEN) return;
+            const content = message.serverContent;
+            if (!content) return;
+
+            if (content.inputTranscription?.text) {
+              clientWs.send(
+                JSON.stringify({
+                  type: "inputTranscript",
+                  text: content.inputTranscription.text,
+                })
+              );
+            }
+
+            if (content.outputTranscription?.text) {
+              clientWs.send(
+                JSON.stringify({
+                  type: "outputTranscript",
+                  text: content.outputTranscription.text,
+                })
+              );
+            }
+
+            for (const part of content.modelTurn?.parts ?? []) {
+              if (part.inlineData?.data) {
+                clientWs.send(
+                  JSON.stringify({
+                    type: "audio",
+                    audio: part.inlineData.data,
+                  })
+                );
+              }
+            }
+
+            if (content.interrupted) {
+              clientWs.send(JSON.stringify({ type: "interrupted" }));
+            }
+
+            if (content.turnComplete) {
+              clientWs.send(JSON.stringify({ type: "turnComplete" }));
+            }
+          },
+          onerror: (err: any) => {
+            attemptErrored = true;
+            if (!isClosed && liveSession && clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(
+                JSON.stringify({
+                  type: "error",
+                  message: err?.message || "Sajjat Ai লাইভ ভয়েস সংযোগে ত্রুটি হয়েছে।",
+                })
+              );
+            }
+          },
+          onclose: () => {
+            if (!isClosed && liveSession && clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ type: "closed" }));
+              clientWs.close();
+            }
+          },
+        },
+      });
+
+      if (isClosed || attemptErrored || clientWs.readyState !== WebSocket.OPEN) {
+        try {
+          session.close();
+        } catch {
+          // ignore
+        }
+        continue;
+      }
+
+      liveSession = session;
+      connectedModel = attempt.model;
+      break;
+    } catch (err: any) {
+      lastLiveErr = err;
+      liveSession = null;
+      console.warn(`[Phone Live WS] Attempt (${attempt.apiVersion || "default"} / ${attempt.model}) failed:`, err?.message || err);
+    }
+  }
+
+  if (!liveSession || isClosed || clientWs.readyState !== WebSocket.OPEN) {
+    if (liveSession && isClosed) {
+      try {
+        liveSession.close();
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    console.warn(`[Phone Live WS ${sessionId}] Failed:`, lastLiveErr?.message || lastLiveErr);
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(
+        JSON.stringify({
+          type: "error",
+          message: lastLiveErr?.message || "Sajjat Ai লাইভ ভয়েস সেশন চালু করা যায়নি।",
+        })
+      );
+      clientWs.close();
+    }
+    return;
+  }
+
+  // Emit ready ONLY after ai.live.connect resolves (setupComplete received)
+  clientWs.send(JSON.stringify({ type: "ready", model: connectedModel, sessionId }));
+
+  clientWs.on("message", (raw) => {
+    if (!liveSession || isClosed) return;
+    try {
+      const payload = JSON.parse(raw.toString());
+      if (payload.type === "audio" && payload.data) {
+        liveSession.sendRealtimeInput({
+          audio: { data: payload.data, mimeType: "audio/pcm;rate=16000" },
+        });
+      } else if (payload.type === "video" && payload.data) {
+        liveSession.sendRealtimeInput({
+          video: { data: payload.data, mimeType: "image/jpeg" },
+        });
+      } else if (payload.type === "text" && payload.text) {
+        liveSession.sendRealtimeInput({
+          text: String(payload.text),
+        });
+      } else if (payload.type === "audioStreamEnd") {
+        liveSession.sendRealtimeInput({ audioStreamEnd: true });
+      }
+    } catch (msgErr) {
+      console.warn(`[Phone Live WS ${sessionId}] Client message parse error:`, msgErr);
+    }
+  });
+});
 
 server.on("error", (err: any) => {
   console.error("HTTP Server error:", err);

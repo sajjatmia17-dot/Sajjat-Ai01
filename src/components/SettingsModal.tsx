@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { 
   Settings, 
   X, 
@@ -8,17 +8,14 @@ import {
   Zap, 
   BrainCircuit, 
   Sparkles, 
-  Shield, 
   Clock, 
   Cpu, 
-  Info,
-  CheckCircle2,
   Sliders,
   Palette,
-  FileCode,
-  Download
+  Smartphone
 } from "lucide-react";
 import { GeminiModelId, AVAILABLE_MODELS } from "../types";
+import { PhoneControlSettings } from "./PhoneControlSettings";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -37,8 +34,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSelectModel,
   theme,
   onToggleTheme,
-  onOpenHtmlViewer,
 }) => {
+  const [activeTab, setActiveTab] = useState<"general" | "phone_control">("general");
+
   if (!isOpen) return null;
 
   const getModelIcon = (id: GeminiModelId) => {
@@ -57,13 +55,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-xs animate-in fade-in duration-200">
       <div 
-        className="w-full max-w-lg rounded-3xl bg-slate-900 border border-slate-700/80 shadow-2xl p-5 sm:p-6 text-slate-100 relative max-h-[90vh] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-800 animate-in zoom-in-95 duration-150"
+        className={`w-full ${activeTab === "phone_control" ? "max-w-3xl" : "max-w-lg"} rounded-3xl bg-slate-900 border border-slate-700/80 shadow-2xl p-5 sm:p-6 text-slate-100 relative max-h-[90vh] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-800 animate-in zoom-in-95 duration-150 transition-all`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between pb-4 border-b border-slate-800">
           <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
+            <div className="p-2.5 rounded-2xl bg-purple-500/15 border border-purple-500/25 text-purple-400">
               <Settings className="w-5 h-5 animate-spin-slow" />
             </div>
             <div>
@@ -71,19 +69,52 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 সেটিংস (Settings)
               </h3>
               <p className="text-xs text-slate-400">
-                মডেল নির্বাচন ও অ্যাপ্লিকেশন পছন্দসমূহ
+                মডেল নির্বাচন, থিম ও Sajjat Ai Mobile Control
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
+        {/* Settings Tab Navigation */}
+        <div className="mt-4 grid grid-cols-2 gap-2 p-1 rounded-2xl bg-slate-950/90 border border-slate-800">
+          <button
+            type="button"
+            onClick={() => setActiveTab("general")}
+            className={`min-h-[44px] px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-colors whitespace-nowrap cursor-pointer ${
+              activeTab === "general"
+                ? "bg-indigo-600 text-white shadow-sm"
+                : "text-slate-400 hover:text-white"
+            }`}
+          >
+            <Sliders className="w-4 h-4 shrink-0" />
+            <span>সাধারণ ও মডেল</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("phone_control")}
+            className={`min-h-[44px] px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-colors whitespace-nowrap cursor-pointer ${
+              activeTab === "phone_control"
+                ? "bg-purple-600 text-white shadow-sm"
+                : "text-slate-400 hover:text-white"
+            }`}
+          >
+            <Smartphone className="w-4 h-4 shrink-0" />
+            <span className="truncate">Sajjat Ai Mobile Control</span>
+          </button>
+        </div>
+
         {/* Content */}
+        {activeTab === "phone_control" ? (
+          <div className="py-4">
+            <PhoneControlSettings theme={theme} isModalOpen={isOpen && activeTab === "phone_control"} />
+          </div>
+        ) : (
         <div className="py-4 space-y-6">
           {/* Section 1: Model Selection */}
           <div className="space-y-3">
@@ -228,13 +259,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
         </div>
+        )}
 
         {/* Footer */}
         <div className="pt-3 border-t border-slate-800 flex justify-end">
           <button
             type="button"
             onClick={onClose}
-            className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md shadow-indigo-600/20 transition-all active:scale-95"
+            className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md shadow-indigo-600/20 transition-all active:scale-95 cursor-pointer"
           >
             সম্পন্ন (Done)
           </button>

@@ -2,7 +2,43 @@
   publish = "dist"
   command = "npm run build"
 
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/phone-control"
+  to = "/.netlify/functions/phone-control"
+  status = 200
+
+[[redirects]]
+  from = "/api/phone-control/*"
+  to = "/.netlify/functions/phone-control"
+  status = 200
+
+[[redirects]]
+  from = "/api/chat"
+  to = "/.netlify/functions/ai-gateway"
+  status = 200
+
+[[redirects]]
+  from = "/api/ai-capabilities"
+  to = "/.netlify/functions/ai-gateway"
+  status = 200
+
+[[redirects]]
+  from = "/api/universal-search/*"
+  to = "/.netlify/functions/ai-gateway"
+  status = 200
+
+[[redirects]]
+  from = "/api/admin/*"
+  to = "/.netlify/functions/ai-gateway"
+  status = 200
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
+
+

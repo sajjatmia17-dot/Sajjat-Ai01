@@ -84,33 +84,48 @@ export function getOrCreateGuestId(): string {
   }
 }
 
+export async function getFirebaseAuthHeaders(forceRefresh = false): Promise<Record<string, string>> {
+  try {
+    const current = auth.currentUser;
+    if (!current) return {};
+    const token = await current.getIdToken(forceRefresh);
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch {
+    return {};
+  }
+}
+
 export async function syncUserProfileToDatabase(profileData: UserProfile): Promise<void> {
   if (!profileData || !profileData.uid || profileData.uid.startsWith("guest_")) return;
   const now = new Date().toISOString();
-  const payload = {
+  const basePayload = {
     uid: profileData.uid,
     email: profileData.email || "",
     displayName: profileData.displayName || profileData.email?.split("@")[0] || "User",
     photoURL: profileData.photoURL || "",
     bio: profileData.bio || "Sajjat AI এর একজন নিয়মিত ব্যবহারকারী।",
-    status: profileData.status || "active",
     createdAt: profileData.createdAt || now,
     lastLoginAt: now,
   };
 
   try {
     const profileRef = ref(database, `users/${profileData.uid}/profile`);
-    await update(profileRef, payload);
+    const existingSnap = await get(profileRef);
+    const existingStatus = existingSnap.exists() ? existingSnap.val()?.status : undefined;
+    const safeStatus = existingStatus || "active";
+    await update(profileRef, { ...basePayload, status: safeStatus });
   } catch (err) {
     try {
       const profileRef = ref(database, `users/${profileData.uid}/profile`);
-      await set(profileRef, payload);
+      await set(profileRef, { ...basePayload, status: "active" });
     } catch (_) {}
   }
 
   try {
     const registryRef = ref(database, `registered_users/${profileData.uid}`);
-    await set(registryRef, payload);
+    const existingRegSnap = await get(registryRef);
+    const existingStatus = existingRegSnap.exists() ? existingRegSnap.val()?.status : undefined;
+    await update(registryRef, { ...basePayload, status: existingStatus || "active" });
   } catch (err) {
     console.warn("RTDB registered_users sync skipped:", err);
   }
@@ -231,15 +246,23 @@ export async function resetPassword(email: string): Promise<void> {
 }
 
 export async function updateUserProfile(uid: string, updates: Partial<UserProfile>): Promise<void> {
+  // Prevent self-escalation: never let regular user updates mutate role/status/uid/email
+  const safeUpdates: Record<string, any> = {};
+  if (typeof updates.displayName === "string") safeUpdates.displayName = updates.displayName.trim();
+  if (typeof updates.bio === "string") safeUpdates.bio = updates.bio.trim();
+  if (typeof updates.photoURL === "string") safeUpdates.photoURL = updates.photoURL;
+
   try {
-    const profileRef = ref(database, `users/${uid}/profile`);
-    await update(profileRef, updates);
+    if (Object.keys(safeUpdates).length > 0) {
+      const profileRef = ref(database, `users/${uid}/profile`);
+      await update(profileRef, safeUpdates);
+    }
   } catch (err) {
     console.warn("RTDB profile update skipped or failed gracefully:", err);
   }
-  if (auth.currentUser && updates.displayName) {
+  if (auth.currentUser && safeUpdates.displayName) {
     try {
-      await updateProfile(auth.currentUser, { displayName: updates.displayName });
+      await updateProfile(auth.currentUser, { displayName: safeUpdates.displayName });
     } catch (err) {
       console.warn("Auth updateProfile skipped or failed gracefully:", err);
     }
@@ -266,216 +289,245 @@ export function isAdmin(email?: string | null): boolean {
   return email.toLowerCase().trim() === ADMIN_EMAIL.toLowerCase().trim();
 }
 
-// Admin Authentication via Firebase
-export async function loginAdminWithCurrentSession(): Promise<UserProfile | null> {
+export async function verifyBackendAdminAccess(): Promise<{
+  authorized: boolean;
+  email?: string;
+  reason?: string;
+}> {
   const current = auth.currentUser;
-  if (current && current.email && isAdmin(current.email)) {
-    let profileData: UserProfile = {
-      uid: current.uid,
-      email: current.email,
-      displayName: current.displayName || "Sajjat Mia (Admin)",
-      bio: "Sajjat AI এর সম্মানিত প্রতিষ্ঠাতা ও অ্যাডমিনিস্ট্রেটর।",
-      status: "vip",
-      createdAt: new Date().toISOString(),
-      lastLoginAt: new Date().toISOString()
+  if (!current || !current.email || !isAdmin(current.email)) {
+    return {
+      authorized: false,
+      email: current?.email || undefined,
+      reason: `Access Denied: শুধুমাত্র অনুমোদিত অ্যাডমিন (${ADMIN_EMAIL}) প্রবেশ করতে পারবেন।`,
     };
-
-    try {
-      const profileRef = ref(database, `users/${current.uid}/profile`);
-      const snap = await get(profileRef);
-      if (snap.exists()) {
-        profileData = snap.val();
-      } else {
-        await set(profileRef, profileData);
-      }
-    } catch (err) {
-      console.warn("RTDB session read failed, returning local admin profile:", err);
-    }
-    return profileData;
   }
-  return null;
+
+  try {
+    const headers = await getFirebaseAuthHeaders(true);
+    if (!headers.Authorization) {
+      return {
+        authorized: false,
+        email: current.email,
+        reason: "Access Denied: বৈধ Firebase ID টোকেন পাওয়া যায়নি।",
+      };
+    }
+
+    const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+    const res = await fetch(`${baseUrl}/api/admin/verify`, {
+      method: "GET",
+      headers,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data?.authorized === true) {
+      return { authorized: true, email: data.email || current.email };
+    }
+    return {
+      authorized: false,
+      email: current.email,
+      reason: data?.error || `অ্যাডমিন ভেরিফিকেশন ব্যর্থ হয়েছে (HTTP ${res.status})।`,
+    };
+  } catch (err: any) {
+    return {
+      authorized: false,
+      email: current.email,
+      reason: err?.message || "অ্যাডমিন সার্ভারের সাথে সংযোগ যাচাই করা যায়নি।",
+    };
+  }
 }
 
-// Master Admin Passkeys & PINs for owner Sajjat Mia (sajjatmia17@gmail.com)
-const ADMIN_MASTER_PASSKEYS = [
-  "sajjatmia1711&",
-  "sajjat1711",
-  "1711",
-  "admin1711",
-  "sajjatmia",
-  "sajjat",
-  "sajjatai"
-];
-
-export async function loginAdminWithMasterKey(key: string, skipKeyCheck: boolean = false): Promise<UserProfile> {
-  if (!skipKeyCheck) {
-    const normalizedKey = key.trim().toLowerCase();
-    const isMasterKeyMatch = ADMIN_MASTER_PASSKEYS.some((k) => k.toLowerCase() === normalizedKey);
-    if (!isMasterKeyMatch) {
-      throw new Error("ভুল অ্যাডমিন সিক্রেট পিন বা মাস্টার পাসকি। সঠিক কোড দিন।");
-    }
+export async function verifyBackendAdminPasscode(passcode: string): Promise<{
+  authorized: boolean;
+  email?: string;
+  reason?: string;
+}> {
+  const current = auth.currentUser;
+  if (!current || !isAdmin(current.email)) {
+    return {
+      authorized: false,
+      email: current?.email || undefined,
+      reason: `Access Denied: শুধুমাত্র অনুমোদিত অ্যাডমিন (${ADMIN_EMAIL}) এই পাসওয়ার্ড যাচাই করতে পারবেন।`,
+    };
   }
 
-  // Master key is verified for sajjatmia17@gmail.com
-  const adminUid = auth.currentUser?.uid || "admin_sajjatmia17";
+  try {
+    const headers = await getFirebaseAuthHeaders();
+    if (!headers.Authorization) {
+      return {
+        authorized: false,
+        email: current.email || undefined,
+        reason: "Access Denied: বৈধ Firebase ID টোকেন পাওয়া যায়নি।",
+      };
+    }
+
+    const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+    const res = await fetch(`${baseUrl}/api/admin/verify-passcode`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...headers,
+      },
+      body: JSON.stringify({ passcode: passcode.trim() }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data?.authorized === true) {
+      return { authorized: true, email: data.email || current.email || undefined };
+    }
+    return {
+      authorized: false,
+      email: current.email || undefined,
+      reason: data?.error || `ভুল অ্যাডমিন প্যানেল পাসওয়ার্ড (HTTP ${res.status})।`,
+    };
+  } catch (err: any) {
+    return {
+      authorized: false,
+      email: current.email || undefined,
+      reason: err?.message || "অ্যাডমিন প্যানেল পাসওয়ার্ড যাচাই করা যায়নি।",
+    };
+  }
+}
+
+export async function reportUnauthorizedAdminAttempt(
+  trigger: string,
+  path: string,
+  reason: string
+): Promise<void> {
+  try {
+    const authHeaders = await getFirebaseAuthHeaders();
+    const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+    await fetch(`${baseUrl}/api/admin/audit-attempt`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders,
+      },
+      body: JSON.stringify({
+        trigger,
+        path,
+        email: auth.currentUser?.email || "guest",
+        reason,
+      }),
+    });
+  } catch {
+    // non-fatal audit reporting
+  }
+}
+
+export async function fetchAdminAuditLogs(limit = 100): Promise<any[]> {
+  try {
+    const headers = await getFirebaseAuthHeaders();
+    if (!headers.Authorization) return [];
+    const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+    const res = await fetch(`${baseUrl}/api/admin/audit-logs?limit=${limit}`, {
+      headers,
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data?.logs) ? data.logs : [];
+  } catch {
+    return [];
+  }
+}
+
+// Verified Firebase Admin Session Entry (requires matching verified ID token on backend)
+export async function loginAdminWithCurrentSession(): Promise<UserProfile | null> {
+  const verification = await verifyBackendAdminAccess();
+  if (!verification.authorized || !auth.currentUser) {
+    return null;
+  }
+
+  const current = auth.currentUser;
   const profileData: UserProfile = {
-    uid: adminUid,
-    email: ADMIN_EMAIL,
-    displayName: "Sajjat Mia (Admin)",
+    uid: current.uid,
+    email: current.email || ADMIN_EMAIL,
+    displayName: current.displayName || "Sajjat Mia (Admin)",
+    photoURL: current.photoURL || "",
     bio: "Sajjat AI এর সম্মানিত প্রতিষ্ঠাতা ও অ্যাডমিনিস্ট্রেটর।",
     status: "vip",
     createdAt: new Date().toISOString(),
-    lastLoginAt: new Date().toISOString()
+    lastLoginAt: new Date().toISOString(),
   };
 
   try {
-    const profileRef = ref(database, `users/${adminUid}/profile`);
+    const profileRef = ref(database, `users/${current.uid}/profile`);
+    const snap = await get(profileRef);
+    if (snap.exists()) {
+      const existing = snap.val();
+      return { ...existing, ...profileData, createdAt: existing.createdAt || profileData.createdAt };
+    }
     await set(profileRef, profileData);
-  } catch (dbErr) {
-    console.warn("RTDB write skipped in master key login:", dbErr);
+  } catch {
+    // Graceful RTDB fallback
+  }
+  return profileData;
+}
+
+export async function loginAdminWithGoogle(): Promise<UserProfile> {
+  const profile = await loginWithGoogle();
+  if (!isAdmin(profile.email)) {
+    await reportUnauthorizedAdminAttempt(
+      "admin_google_login",
+      "/admin",
+      `Non-admin email ${profile.email} attempted admin Google login.`
+    );
+    throw new Error(`Access Denied: "${profile.email}" অনুমোদিত অ্যাডমিন নয়। শুধুমাত্র ${ADMIN_EMAIL} প্রবেশ করতে পারবেন।`);
   }
 
-  return profileData;
+  const verification = await verifyBackendAdminAccess();
+  if (!verification.authorized) {
+    throw new Error(verification.reason || "অ্যাডমিন সার্ভার ভেরিফিকেশন ব্যর্থ হয়েছে।");
+  }
+
+  return { ...profile, status: "vip" };
 }
 
 export async function loginAdmin(email: string, pass: string): Promise<UserProfile> {
   const normalizedEmail = email.trim().toLowerCase();
   if (normalizedEmail !== ADMIN_EMAIL.toLowerCase()) {
-    throw new Error("অননুমোদিত ইমেইল! শুধুমাত্র অ্যাডমিন sajjatmia17@gmail.com প্রবেশ করতে পারবেন।");
+    await reportUnauthorizedAdminAttempt(
+      "admin_email_login",
+      "/admin",
+      `Unauthorized email attempted admin login: ${normalizedEmail}`
+    );
+    throw new Error(`Access Denied: শুধুমাত্র অনুমোদিত অ্যাডমিন ${ADMIN_EMAIL} প্রবেশ করতে পারবেন।`);
   }
 
   const trimmedPass = pass.trim();
   if (!trimmedPass) {
-    throw new Error("পাসওয়ার্ড দেওয়া আবশ্যক। অনুগ্রহ করে সঠিক পাসওয়ার্ড বা সিক্রেট পিন দিন।");
+    throw new Error("পাসওয়ার্ড দেওয়া আবশ্যক।");
   }
 
-  // Retrieve dynamic admin password from all possible sources (memory, local storage, server API, RTDB)
-  let savedAdminPassword = "";
+  const userCredential = await signInWithEmailAndPassword(auth, email.trim(), trimmedPass);
+  const firebaseUser = userCredential.user;
 
-  // Source 1: In-Memory cache
-  if (currentSystemSettingsInMemory?.adminPassword && typeof currentSystemSettingsInMemory.adminPassword === "string" && currentSystemSettingsInMemory.adminPassword.trim() !== "") {
-    savedAdminPassword = currentSystemSettingsInMemory.adminPassword.trim();
+  if (!firebaseUser.emailVerified) {
+    await reportUnauthorizedAdminAttempt(
+      "admin_unverified_email",
+      "/admin",
+      "Admin email signed in without verified email flag."
+    );
+    throw new Error("আপনার ইমেইল ভেরিফাই করা নেই। অনুগ্রহ করে verified Google Sign-In ব্যবহার করুন অথবা ইমেইল ভেরিফাই করুন।");
   }
 
-  // Source 2: LocalStorage cache
-  if (!savedAdminPassword) {
-    try {
-      const cached = typeof window !== "undefined" ? localStorage.getItem("sajjat_ai_system_settings") : null;
-      if (cached) {
-        const settings = JSON.parse(cached);
-        if (settings?.adminPassword && typeof settings.adminPassword === "string" && settings.adminPassword.trim() !== "") {
-          savedAdminPassword = settings.adminPassword.trim();
-        }
-      }
-    } catch (e) {}
+  const verification = await verifyBackendAdminAccess();
+  if (!verification.authorized) {
+    throw new Error(verification.reason || "ব্যাকএন্ড অ্যাডমিন ভেরিফিকেশন ব্যর্থ হয়েছে।");
   }
 
-  // Source 3: Server API Endpoint
-  if (!savedAdminPassword) {
-    try {
-      const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
-      const res = await fetch(`${baseUrl}/api/system-settings`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.adminPassword && typeof data.adminPassword === "string" && data.adminPassword.trim() !== "") {
-          savedAdminPassword = data.adminPassword.trim();
-        }
-      }
-    } catch (e) {}
-  }
-
-  // Source 4: Firebase Realtime Database
-  if (!savedAdminPassword) {
-    try {
-      const settingsRef = ref(database, "system_settings");
-      const snapshot = await get(settingsRef);
-      if (snapshot.exists()) {
-        const settings = snapshot.val();
-        if (settings?.adminPassword && typeof settings.adminPassword === "string" && settings.adminPassword.trim() !== "") {
-          savedAdminPassword = settings.adminPassword.trim();
-        }
-      }
-    } catch (err) {
-      console.warn("Could not check dynamic admin password from RTDB:", err);
-    }
-  }
-
-  // IF a custom savedAdminPassword is set by Admin:
-  if (savedAdminPassword) {
-    if (trimmedPass === savedAdminPassword) {
-      return await loginAdminWithMasterKey(trimmedPass, true);
-    } else {
-      throw new Error("ভুল পাসওয়ার্ড দেওয়া হয়েছে! আপনি অ্যাডমিন সেটিংসে যে নতুন পাসওয়ার্ড সেট করেছেন সেটি প্রবেশ করান।");
-    }
-  }
-
-  // IF NO custom savedAdminPassword is set, check default master passkeys/PINs
-  const isMasterKey = ADMIN_MASTER_PASSKEYS.some((k) => k.toLowerCase() === trimmedPass.toLowerCase());
-  if (isMasterKey) {
-    return await loginAdminWithMasterKey(trimmedPass);
-  }
-
-  // Check if current authenticated user is already admin
-  if (auth.currentUser && auth.currentUser.email?.toLowerCase() === normalizedEmail) {
-    const existing = await loginAdminWithCurrentSession();
-    if (existing) return existing;
-  }
-
-  // 3. Authenticate with Firebase Auth
-  let userCredential;
-  try {
-    userCredential = await signInWithEmailAndPassword(auth, email.trim(), trimmedPass);
-  } catch (error: any) {
-    const errCode = error?.code || "";
-    if (errCode === "auth/user-not-found" || errCode === "auth/invalid-credential") {
-      // Try to create the admin user if it doesn't exist yet
-      try {
-        userCredential = await createUserWithEmailAndPassword(auth, email.trim(), trimmedPass);
-        try {
-          await updateProfile(userCredential.user, { displayName: "Sajjat Mia (Admin)" });
-        } catch (_) {}
-      } catch (createErr: any) {
-        const createCode = createErr?.code || "";
-        if (createCode === "auth/email-already-in-use" || createCode === "auth/invalid-credential") {
-          throw new Error("ভুল পাসওয়ার্ড দেওয়া হয়েছে। আপনি সিক্রেট পিন (1711) দিয়ে লগইন করতে পারেন অথবা নিচে 'পাসওয়ার্ড রিসেট' বাটনে ক্লিক করুন।");
-        } else if (createCode === "auth/weak-password") {
-          throw new Error("পাসওয়ার্ডটি অন্তত ৬ অক্ষরের হতে হবে।");
-        } else if (createCode === "auth/network-request-failed") {
-          // Network issue with Identity Toolkit endpoint, safely authenticate admin with verified profile
-          console.warn("Firebase Auth network error during registration, fallback to verified admin profile");
-          return await loginAdminWithMasterKey("1711");
-        } else {
-          throw new Error("ভুল পাসওয়ার্ড অথবা অথেনটিকেশন ব্যর্থ হয়েছে। সিক্রেট পিন (1711) ব্যবহার করুন অথবা রিসেট করুন।");
-        }
-      }
-    } else if (errCode === "auth/wrong-password") {
-      throw new Error("ভুল পাসওয়ার্ড দেওয়া হয়েছে। আপনি সিক্রেট পিন (1711) দিয়ে লগইন করতে পারেন অথবা নিচে 'পাসওয়ার্ড রিসেট' বাটনে ক্লিক করুন।");
-    } else if (errCode === "auth/too-many-requests") {
-      throw new Error("অতিরিক্ত ভুল চেষ্টার কারণে সাময়িকভাবে বন্ধ রয়েছে। সিক্রেট পিন (1711) ব্যবহার করুন অথবা কিছুক্ষণ পর চেষ্টা করুন।");
-    } else if (errCode === "auth/network-request-failed") {
-      // Identity toolkit network error fallback
-      console.warn("Firebase Auth network error during login, fallback to verified admin profile");
-      return await loginAdminWithMasterKey("1711");
-    } else {
-      throw new Error(error.message || "অ্যাডমিন লগইন ব্যর্থ হয়েছে। সঠিক পাসওয়ার্ড দিন।");
-    }
-  }
-
-  const user = userCredential.user;
-  const adminUid = user.uid;
   const profileData: UserProfile = {
-    uid: adminUid,
-    email: user.email || email,
-    displayName: user.displayName || "Sajjat Mia (Admin)",
+    uid: firebaseUser.uid,
+    email: firebaseUser.email || ADMIN_EMAIL,
+    displayName: firebaseUser.displayName || "Sajjat Mia (Admin)",
+    photoURL: firebaseUser.photoURL || "",
     bio: "Sajjat AI এর সম্মানিত প্রতিষ্ঠাতা ও অ্যাডমিনিস্ট্রেটর।",
     status: "vip",
     createdAt: new Date().toISOString(),
-    lastLoginAt: new Date().toISOString()
+    lastLoginAt: new Date().toISOString(),
   };
 
   try {
-    const profileRef = ref(database, `users/${adminUid}/profile`);
-    await set(profileRef, profileData);
+    const profileRef = ref(database, `users/${firebaseUser.uid}/profile`);
+    await update(profileRef, profileData);
   } catch (dbErr) {
     console.warn("RTDB write skipped in loginAdmin:", dbErr);
   }
@@ -581,31 +633,98 @@ export async function deleteUserData(uid: string): Promise<void> {
 }
 
 // ----------------------------------------------------
-// NOTIFICATIONS SYSTEM (Firebase RTDB Scoped)
+// NOTIFICATIONS SYSTEM (Multi-Layer & Firebase RTDB Scoped)
 // ----------------------------------------------------
-export function subscribeToNotifications(onUpdate: (notifications: any[]) => void) {
-  const notifRef = ref(database, "notifications");
-  return onValue(notifRef, (snapshot) => {
-    if (snapshot.exists()) {
-      const data = snapshot.val();
-      const list: any[] = Object.entries(data).map(([id, val]: [string, any]) => ({
-        id,
-        ...val
-      }));
-      // Sort newest first
-      list.sort((a, b) => {
-        const timeA = typeof a.createdAt === "number" ? a.createdAt : new Date(a.createdAt).getTime();
-        const timeB = typeof b.createdAt === "number" ? b.createdAt : new Date(b.createdAt).getTime();
-        return timeB - timeA;
-      });
-      onUpdate(list);
-    } else {
-      onUpdate([]);
+const notificationsListeners = new Set<(notifications: any[]) => void>();
+let notificationsInMemory: any[] = [];
+
+// Initialize notifications cache synchronously from localStorage if present
+try {
+  const cachedNotifs = typeof window !== "undefined" ? localStorage.getItem("sajjat_ai_notifications") : null;
+  if (cachedNotifs) {
+    const parsed = JSON.parse(cachedNotifs);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      notificationsInMemory = parsed;
     }
-  }, (error) => {
-    console.warn("Notifications subscription error:", error);
-    onUpdate([]);
+  }
+} catch (e) {}
+
+// Helper to persist and notify all active UI listeners
+function updateNotificationsState(newList: any[]) {
+  // Sort newest first
+  newList.sort((a, b) => {
+    const timeA = typeof a.createdAt === "number" ? a.createdAt : new Date(a.createdAt).getTime();
+    const timeB = typeof b.createdAt === "number" ? b.createdAt : new Date(b.createdAt).getTime();
+    return timeB - timeA;
   });
+
+  notificationsInMemory = newList;
+
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("sajjat_ai_notifications", JSON.stringify(newList));
+    }
+  } catch (e) {}
+
+  notificationsListeners.forEach((listener) => {
+    try {
+      listener(notificationsInMemory);
+    } catch (err) {
+      console.warn("Notification listener execution error:", err);
+    }
+  });
+}
+
+export function subscribeToNotifications(onUpdate: (notifications: any[]) => void) {
+  notificationsListeners.add(onUpdate);
+
+  // 1. Immediately emit in-memory / cached notifications
+  onUpdate(notificationsInMemory);
+
+  // 2. Hydrate from Express server backend
+  try {
+    const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+    fetch(`${baseUrl}/api/notifications`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((serverData) => {
+        if (serverData && Array.isArray(serverData.notifications) && serverData.notifications.length > 0) {
+          const map = new Map<string, any>();
+          serverData.notifications.forEach((n: any) => map.set(n.id, n));
+          notificationsInMemory.forEach((n: any) => map.set(n.id, n));
+          updateNotificationsState(Array.from(map.values()));
+        }
+      })
+      .catch((err) => console.warn("Server notifications hydrate skipped:", err));
+  } catch (e) {}
+
+  // 3. Listen to Firebase Realtime Database
+  const notifRef = ref(database, "notifications");
+  const unsubscribeRtdb = onValue(
+    notifRef,
+    (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.val();
+        const rtdbList: any[] = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val
+        }));
+        const map = new Map<string, any>();
+        notificationsInMemory.forEach((n: any) => map.set(n.id, n));
+        rtdbList.forEach((n: any) => map.set(n.id, n));
+        updateNotificationsState(Array.from(map.values()));
+      }
+    },
+    (error) => {
+      // If Firebase RTDB reports PERMISSION_DENIED or network issue,
+      // DO NOT clear notifications or overwrite state! Simply log warning.
+      console.warn("Firebase RTDB notifications sync note:", error?.message || error);
+    }
+  );
+
+  return () => {
+    notificationsListeners.delete(onUpdate);
+    unsubscribeRtdb();
+  };
 }
 
 export async function createNotification(notification: {
@@ -618,8 +737,7 @@ export async function createNotification(notification: {
   senderName?: string;
   expirationOption?: 'none' | '1d' | '3d' | '7d' | '30d' | string;
 }): Promise<string> {
-  const notifId = `notif_${Date.now()}`;
-  const notifRef = ref(database, `notifications/${notifId}`);
+  const notifId = `notif_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
   const now = Date.now();
 
   let expiresAt: number | null = null;
@@ -641,35 +759,130 @@ export async function createNotification(notification: {
     expirationOption: notification.expirationOption || 'none',
     readBy: {}
   };
-  await set(notifRef, payload);
+
+  // 1. Immediately update in-memory state & localStorage & listeners (instant UI response)
+  const updatedList = [payload, ...notificationsInMemory.filter((n) => n.id !== notifId)];
+  updateNotificationsState(updatedList);
+
+  // 2. Sync to Express server backend (with verified Admin JWT)
+  try {
+    const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+    const authHeaders = await getFirebaseAuthHeaders();
+    await fetch(`${baseUrl}/api/notifications`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    console.warn("Server notification sync warning:", err);
+  }
+
+  // 3. Gracefully sync to Firebase RTDB if permissions allow
+  try {
+    const notifRef = ref(database, `notifications/${notifId}`);
+    await set(notifRef, sanitizeForFirebase(payload));
+  } catch (rtdbErr: any) {
+    // If RTDB returns PERMISSION_DENIED or network error, log warning without throwing!
+    console.warn("Firebase RTDB notification save note:", rtdbErr?.message || rtdbErr);
+  }
+
   return notifId;
 }
 
 export async function updateNotification(id: string, updates: any): Promise<void> {
-  const notifRef = ref(database, `notifications/${id}`);
-  await update(notifRef, updates);
+  const updatedList = notificationsInMemory.map((n) => (n.id === id ? { ...n, ...updates } : n));
+  updateNotificationsState(updatedList);
+
+  try {
+    const notifRef = ref(database, `notifications/${id}`);
+    await update(notifRef, sanitizeForFirebase(updates));
+  } catch (rtdbErr: any) {
+    console.warn("Firebase RTDB notification update note:", rtdbErr?.message || rtdbErr);
+  }
 }
 
 export async function deleteNotification(id: string): Promise<void> {
-  const notifRef = ref(database, `notifications/${id}`);
-  await remove(notifRef);
+  // 1. Update in-memory & localStorage & listeners
+  const updatedList = notificationsInMemory.filter((n) => n.id !== id);
+  updateNotificationsState(updatedList);
+
+  // 2. Sync to Express server backend (with verified Admin JWT)
+  try {
+    const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+    const authHeaders = await getFirebaseAuthHeaders();
+    await fetch(`${baseUrl}/api/notifications/${id}`, {
+      method: "DELETE",
+      headers: authHeaders,
+    });
+  } catch (err) {
+    console.warn("Server notification delete sync warning:", err);
+  }
+
+  // 3. Gracefully remove from Firebase RTDB
+  try {
+    const notifRef = ref(database, `notifications/${id}`);
+    await remove(notifRef);
+  } catch (rtdbErr: any) {
+    console.warn("Firebase RTDB notification delete note:", rtdbErr?.message || rtdbErr);
+  }
 }
 
 export async function markNotificationAsRead(notifId: string, uid: string): Promise<void> {
-  const readRef = ref(database, `notifications/${notifId}/readBy/${uid}`);
-  await set(readRef, true);
+  if (!uid) return;
+
+  // 1. Update in-memory & localStorage & listeners
+  const updatedList = notificationsInMemory.map((n) => {
+    if (n.id === notifId) {
+      return {
+        ...n,
+        readBy: {
+          ...(n.readBy || {}),
+          [uid]: true,
+        },
+      };
+    }
+    return n;
+  });
+  updateNotificationsState(updatedList);
+
+  // 2. Sync to Express server backend
+  try {
+    const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+    fetch(`${baseUrl}/api/notifications/${notifId}/read`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uid }),
+    }).catch(() => {});
+  } catch (err) {}
+
+  // 3. Gracefully update in Firebase RTDB
+  try {
+    const readRef = ref(database, `notifications/${notifId}/readBy/${uid}`);
+    await set(readRef, true);
+  } catch (rtdbErr: any) {
+    // Graceful catch
+  }
 }
 
 // ----------------------------------------------------
 // APP CONTENT MANAGEMENT (Help Center & Privacy Policy)
 // ----------------------------------------------------
 export function subscribeToAppContent(onUpdate: (content: any) => void) {
+  try {
+    const cached = typeof window !== "undefined" ? localStorage.getItem("sajjat_ai_app_content") : null;
+    if (cached) {
+      onUpdate(JSON.parse(cached));
+    }
+  } catch (e) {}
+
   const contentRef = ref(database, "app_content");
   return onValue(contentRef, (snapshot) => {
     if (snapshot.exists()) {
-      onUpdate(snapshot.val());
-    } else {
-      onUpdate(null);
+      const val = snapshot.val();
+      try {
+        localStorage.setItem("sajjat_ai_app_content", JSON.stringify(val));
+      } catch (e) {}
+      onUpdate(val);
     }
   }, (err) => {
     console.warn("Content subscription error:", err);
@@ -677,20 +890,39 @@ export function subscribeToAppContent(onUpdate: (content: any) => void) {
 }
 
 export async function saveAppContent(content: any): Promise<void> {
-  const contentRef = ref(database, "app_content");
-  await set(contentRef, content);
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("sajjat_ai_app_content", JSON.stringify(content));
+    }
+  } catch (e) {}
+
+  try {
+    const contentRef = ref(database, "app_content");
+    await set(contentRef, sanitizeForFirebase(content));
+  } catch (err: any) {
+    console.warn("Firebase RTDB app content save note:", err?.message || err);
+  }
 }
 
 // ----------------------------------------------------
 // AI SETTINGS & CONFIGURATION (Firebase Scoped)
 // ----------------------------------------------------
 export function subscribeToAdminAISettings(onUpdate: (settings: any) => void) {
+  try {
+    const cached = typeof window !== "undefined" ? localStorage.getItem("sajjat_ai_admin_ai_settings") : null;
+    if (cached) {
+      onUpdate(JSON.parse(cached));
+    }
+  } catch (e) {}
+
   const aiRef = ref(database, "admin_config/ai_settings");
   return onValue(aiRef, (snapshot) => {
     if (snapshot.exists()) {
-      onUpdate(snapshot.val());
-    } else {
-      onUpdate(null);
+      const val = snapshot.val();
+      try {
+        localStorage.setItem("sajjat_ai_admin_ai_settings", JSON.stringify(val));
+      } catch (e) {}
+      onUpdate(val);
     }
   }, (err) => {
     console.warn("AI settings subscription error:", err);
@@ -698,8 +930,18 @@ export function subscribeToAdminAISettings(onUpdate: (settings: any) => void) {
 }
 
 export async function saveAdminAISettings(settings: any): Promise<void> {
-  const aiRef = ref(database, "admin_config/ai_settings");
-  await set(aiRef, settings);
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("sajjat_ai_admin_ai_settings", JSON.stringify(settings));
+    }
+  } catch (e) {}
+
+  try {
+    const aiRef = ref(database, "admin_config/ai_settings");
+    await set(aiRef, sanitizeForFirebase(settings));
+  } catch (err: any) {
+    console.warn("Firebase RTDB AI settings save note:", err?.message || err);
+  }
 }
 
 // Chat Session Database Helpers (Scoped strictly to users/{uid}/chats)
@@ -1107,7 +1349,6 @@ export const DEFAULT_SYSTEM_SETTINGS: SystemSettingsConfig = {
   temperature: 0.7,
   systemInstruction: "",
   adminTapCount: 7,
-  adminPassword: "",
   aiLimitSystemEnabled: false,
   updatedAt: new Date().toISOString()
 };
@@ -1166,7 +1407,6 @@ export function subscribeToSystemSettings(onUpdate: (settings: SystemSettingsCon
     },
     (err) => {
       console.warn("RTDB system settings warning:", err);
-      // DO NOT overwrite memory or localStorage on RTDB warning!
     }
   );
 
@@ -1177,9 +1417,10 @@ export function subscribeToSystemSettings(onUpdate: (settings: SystemSettingsCon
 }
 
 export async function saveSystemSettings(settings: Partial<SystemSettingsConfig>): Promise<void> {
+  const { adminPassword: _strippedPassword, ...cleanIncoming } = settings as any;
   const updatedSettings: SystemSettingsConfig = {
     ...currentSystemSettingsInMemory,
-    ...settings,
+    ...cleanIncoming,
     updatedAt: new Date().toISOString(),
   };
 
@@ -1194,12 +1435,13 @@ export async function saveSystemSettings(settings: Partial<SystemSettingsConfig>
   // 3. Notify all active listeners in UI IMMEDIATELY
   systemSettingsListeners.forEach((fn) => fn(updatedSettings));
 
-  // 4. Sync to Express server in-memory & persistent state
+  // 4. Sync to Express server with verified Admin ID token
   try {
     const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+    const authHeaders = await getFirebaseAuthHeaders();
     await fetch(`${baseUrl}/api/system-settings`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders },
       body: JSON.stringify(updatedSettings),
     });
   } catch (err) {
@@ -1349,7 +1591,8 @@ export function subscribeToApiProviders(onUpdate: (providers: Record<string, Api
       const saved = snapshot.val();
       const merged: Record<string, ApiProviderConfig> = { ...DEFAULT_API_PROVIDERS };
       for (const [key, val] of Object.entries(saved)) {
-        merged[key] = { ...(DEFAULT_API_PROVIDERS[key] || {}), ...(val as any) };
+        const cleanVal = { ...(val as any), apiKey: "" };
+        merged[key] = { ...(DEFAULT_API_PROVIDERS[key] || {}), ...cleanVal };
       }
       onUpdate(merged);
     } else {
@@ -1366,12 +1609,19 @@ export async function saveApiProviderConfig(
   config?: Partial<ApiProviderConfig>
 ): Promise<void> {
   const providerId = typeof providerOrId === "string" ? providerOrId : providerOrId.id;
-  const data = typeof providerOrId === "string" ? config || {} : providerOrId;
-  const providerRef = ref(database, `admin_config/api_providers/${providerId}`);
-  await update(providerRef, {
-    ...data,
-    lastTestedAt: new Date().toISOString()
-  });
+  const raw = typeof providerOrId === "string" ? config || {} : providerOrId;
+  // Security rule: Never persist raw API keys into RTDB. Store only safe metadata & masked status.
+  const { apiKey: _strippedKey, ...safeMetadata } = raw as any;
+  try {
+    const providerRef = ref(database, `admin_config/api_providers/${providerId}`);
+    await update(providerRef, sanitizeForFirebase({
+      ...safeMetadata,
+      apiKey: "",
+      lastTestedAt: new Date().toISOString(),
+    }));
+  } catch (err: any) {
+    console.warn("RTDB API provider metadata save note:", err?.message || err);
+  }
 }
 
 // ==========================================

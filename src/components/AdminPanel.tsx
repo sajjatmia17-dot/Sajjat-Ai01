@@ -74,7 +74,12 @@ import {
   subscribeToPurchaseRequests,
   updatePurchaseRequestStatus,
   updateUserAiLimit,
-  database
+  database,
+  isAdmin,
+  verifyBackendAdminAccess,
+  fetchAdminAuditLogs,
+  getFirebaseAuthHeaders,
+  ADMIN_EMAIL
 } from "../firebase";
 import { ref, get } from "firebase/database";
 import { AdminBookLibrary } from "./admin/AdminBookLibrary";
@@ -86,6 +91,7 @@ import { AdminBranding } from "./admin/AdminBranding";
 import { AdminLimitsAndPackages } from "./admin/AdminLimitsAndPackages";
 import { AdminPurchaseRequests } from "./admin/AdminPurchaseRequests";
 import { AdminFeatureControl } from "./admin/AdminFeatureControl";
+import { AdminSearchManager } from "./admin/AdminSearchManager";
 
 interface AdminPanelProps {
   adminUser: UserProfile;
@@ -98,6 +104,7 @@ type AdminTab =
   | "users" 
   | "chats"
   | "books" 
+  | "search_management"
   | "limits_packages"
   | "purchase_requests"
   | "ai_control" 
@@ -165,13 +172,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   } | null>(null);
   const [saveAiSuccess, setSaveAiSuccess] = useState(false);
 
-  // Security and custom settings state
+  // Security, server verification & audit log state
   const [systemSettings, setSystemSettings] = useState<SystemSettingsConfig | null>(null);
   const [adminTapCount, setAdminTapCount] = useState<number>(7);
-  const [adminPassword, setAdminPassword] = useState<string>("");
-  const [showAdminPassword, setShowAdminPassword] = useState(false);
   const [isSavingSecurity, setIsSavingSecurity] = useState(false);
   const [securitySaveSuccess, setSecuritySaveSuccess] = useState(false);
+  const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  const [loadingAuditLogs, setLoadingAuditLogs] = useState(false);
+  const [backendVerified, setBackendVerified] = useState<boolean>(isAdmin(adminUser?.email));
+  const [verificationError, setVerificationError] = useState<string | null>(null);
 
   // Content Management Editor State
   const [helpItems, setHelpItems] = useState<Array<{ id: string; title: string; description: string }>>([
@@ -243,30 +252,54 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     return () => unsub();
   }, []);
 
-  // 5. Subscribe to System Settings (Tap Count & Admin Password)
+  // 5. Subscribe to System Settings & Verify Backend Admin Token
   useEffect(() => {
+    let active = true;
+    verifyBackendAdminAccess().then((res) => {
+      if (!active) return;
+      if (!res.authorized) {
+        setBackendVerified(false);
+        setVerificationError(res.reason || "অ্যাডমিন সার্ভার অথেনটিকেশন ব্যর্থ হয়েছে।");
+      } else {
+        setBackendVerified(true);
+        setVerificationError(null);
+      }
+    });
+
     const unsub = subscribeToSystemSettings((settings) => {
       if (settings) {
         setSystemSettings(settings);
         if (typeof settings.adminTapCount === "number" && settings.adminTapCount > 0) {
           setAdminTapCount(settings.adminTapCount);
         }
-        if (typeof settings.adminPassword === "string") {
-          setAdminPassword(settings.adminPassword);
-        }
       }
     });
-    return () => unsub();
-  }, []);
+    return () => {
+      active = false;
+      unsub();
+    };
+  }, [adminUser?.uid, adminUser?.email]);
 
-  // Save custom admin tap count and password settings
+  const loadAuditLogs = async () => {
+    setLoadingAuditLogs(true);
+    const logs = await fetchAdminAuditLogs(100);
+    setAuditLogs(logs);
+    setLoadingAuditLogs(false);
+  };
+
+  useEffect(() => {
+    if (activeTab === "settings" || activeTab === "dashboard") {
+      loadAuditLogs();
+    }
+  }, [activeTab]);
+
+  // Save custom admin tap count (authentication stays strictly Firebase JWT + verified email)
   const handleSaveSecuritySettings = async () => {
     setIsSavingSecurity(true);
     setSecuritySaveSuccess(false);
     try {
       const payload = {
         adminTapCount: Number(adminTapCount) || 7,
-        adminPassword: adminPassword.trim(),
       };
 
       await saveSystemSettings(payload);
@@ -381,18 +414,20 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
   };
 
-  // Test AI Connection Handler
+  // Test AI Connection Handler (with Bearer Token)
   const handleTestAi = async () => {
     setIsTestingAi(true);
     setAiTestResult(null);
 
     try {
-      const res = await fetch(`${getBackendBaseUrl()}/api/admin/test-ai`, {
+      const authHeaders = await getFirebaseAuthHeaders();
+      const res = await fetch(`${getBackendBaseUrl()}/api/admin/test-provider`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders },
         body: JSON.stringify({
+          providerId: "gemini",
           apiKey: customKeyInput.trim() || undefined,
-          model: aiSettings.defaultModel,
+          modelId: aiSettings.defaultModel,
         }),
       });
       const data = await res.json();
@@ -407,16 +442,25 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
   };
 
-  // Save AI Settings Handler
+  // Save AI Settings Handler (with Bearer Token)
   const handleSaveAiSettings = async () => {
     try {
-      // If custom key entered, update server memory
       if (customKeyInput.trim()) {
-        await fetch(`${getBackendBaseUrl()}/api/admin/set-key`, {
+        const authHeaders = await getFirebaseAuthHeaders();
+        const res = await fetch(`${getBackendBaseUrl()}/api/admin/save-provider`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ apiKey: customKeyInput.trim() }),
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          body: JSON.stringify({
+            providerId: "gemini",
+            apiKey: customKeyInput.trim(),
+            modelId: aiSettings.defaultModel,
+            enabled: true,
+          }),
         });
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData?.error || "অ্যাডমিন অনুমোদন ব্যর্থ হয়েছে।");
+        }
       }
 
       const updatedSettings: AdminAISettings = {
@@ -594,6 +638,23 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               </div>
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold">
                 New
+              </span>
+            </button>
+
+            <button
+              onClick={() => { setActiveTab("search_management"); setMobileMenuOpen(false); }}
+              className={`w-full flex items-center justify-between px-3.5 py-2 rounded-2xl text-xs font-semibold transition-all ${
+                activeTab === "search_management"
+                  ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
+                  : "text-slate-300 hover:bg-slate-800 hover:text-white"
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <Search className="w-4 h-4 shrink-0 text-cyan-400" />
+                <span>🔎 সার্চ ও মিডিয়া</span>
+              </div>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-bold">
+                Search
               </span>
             </button>
 
@@ -820,6 +881,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               >
                 <span className="text-xs">📚</span>
                 <span>Book / PDF Library</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab("search_management")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
+                  activeTab === "search_management"
+                    ? "bg-indigo-600 text-white shadow-sm"
+                    : "bg-slate-900 text-cyan-300 border border-cyan-500/30"
+                }`}
+              >
+                <Search className="w-3.5 h-3.5 text-cyan-400" />
+                <span>🔎 সার্চ ও মিডিয়া</span>
               </button>
 
               <button
@@ -1886,11 +1959,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       </div>
                       <div className="flex justify-between p-2.5 rounded-xl bg-slate-950 border border-slate-800">
                         <span className="text-slate-400">ইমেইল:</span>
-                        <span className="font-mono text-cyan-400">sajjatmia17@gmail.com</span>
+                        <span className="font-mono text-cyan-400">{ADMIN_EMAIL}</span>
                       </div>
                       <div className="flex justify-between p-2.5 rounded-xl bg-slate-950 border border-slate-800">
-                        <span className="text-slate-400">রোল:</span>
-                        <span className="px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 font-bold text-[10px]">Super Administrator</span>
+                        <span className="text-slate-400">সার্ভার ভেরিফিকেশন:</span>
+                        <span className={`px-2 py-0.5 rounded-md font-bold text-[10px] ${
+                          backendVerified
+                            ? "bg-emerald-500/20 text-emerald-300"
+                            : "bg-rose-500/20 text-rose-300"
+                        }`}>
+                          {backendVerified ? "Firebase JWT Verified" : "Unverified"}
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -1900,60 +1979,50 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     <div className="flex items-center justify-between pb-3 border-b border-slate-800">
                       <div className="flex items-center gap-2">
                         <Key className="w-4 h-4 text-indigo-400" />
-                        <h3 className="text-sm font-bold text-white">অ্যাডমিন অ্যাক্সেস ও নিরাপত্তা (Admin Access & Security)</h3>
+                        <h3 className="text-sm font-bold text-white">অ্যাডমিন অ্যাক্সেস ও নিরাপত্তা (Firebase Auth Locked)</h3>
                       </div>
                       {securitySaveSuccess && (
-                        <span className="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full font-bold animate-pulse">
+                        <span className="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full font-bold">
                           ✓ সংরক্ষিত হয়েছে
                         </span>
                       )}
                     </div>
 
+                    {verificationError && (
+                      <div className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
+                        {verificationError}
+                      </div>
+                    )}
+
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       {/* Tap Count Input */}
                       <div className="space-y-1.5">
                         <label className="block text-xs font-semibold text-slate-300">
-                          লোগো টাচ কাউন্ট (Required Taps to open Login)
+                          লোগো টাচ কাউন্ট (Trigger Taps for Verified Admin)
                         </label>
                         <select
                           value={adminTapCount}
                           onChange={(e) => setAdminTapCount(Number(e.target.value))}
                           className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-2xl p-2.5 text-xs text-white outline-none"
                         >
-                          {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 20].map((t) => (
+                          {[3, 5, 7, 10, 12, 15].map((t) => (
                             <option key={`tap_count_${t}`} value={t}>
-                              {t} বার টাচ করলে অ্যাডমিন লগইন উইন্ডো আসবে {t === 7 ? "(ডিফল্ট)" : ""}
+                              {t} বার টাচ করলে অ্যাডমিন গেট ট্রিগার হবে {t === 7 ? "(ডিফল্ট)" : ""}
                             </option>
                           ))}
                         </select>
                         <p className="text-[10px] text-slate-500">
-                          হেডারে থাকা লোগোতে কত বার টাচ করলে অ্যাডমিন লগইন প্রম্পট চালু হবে তা নির্বাচন করুন।
+                          সাধারণ ইউজাররা যতবারই টাচ করুক, ভেরিফায়েড {ADMIN_EMAIL} ছাড়া প্রবেশ করতে পারবে না।
                         </p>
                       </div>
 
-                      {/* Password Input */}
-                      <div className="space-y-1.5">
-                        <label className="block text-xs font-semibold text-slate-300">
-                          অ্যাডমিন প্যানেল পাসওয়ার্ড (Admin Access Password)
-                        </label>
-                        <div className="relative">
-                          <input
-                            type={showAdminPassword ? "text" : "password"}
-                            value={adminPassword}
-                            onChange={(e) => setAdminPassword(e.target.value)}
-                            placeholder="নতুন অ্যাডমিন পাসওয়ার্ড দিন (ফাঁকা রাখলে ডিফল্ট মাস্টার পিন কাজ করবে)"
-                            className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 rounded-2xl px-4 py-2.5 pr-10 text-xs text-slate-100 placeholder-slate-500 transition-all outline-none"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setShowAdminPassword((prev) => !prev)}
-                            className="absolute right-3.5 top-2.5 text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
-                          >
-                            {showAdminPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                          </button>
+                      <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 space-y-1.5">
+                        <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-300">
+                          <ShieldCheck className="w-4 h-4" />
+                          <span>সার্ভার-ভিত্তিক JWT সুরক্ষা সক্রিয়</span>
                         </div>
-                        <p className="text-[10px] text-slate-500">
-                          আপনার নিজের একটি কাস্টম অ্যাডমিন পাসওয়ার্ড সেট করতে পারেন। ফাঁকা রাখলে ডিফল্ট পিন (যেমন ১৭১১) কাজ করবে।
+                        <p className="text-[11px] text-slate-400 leading-relaxed">
+                          হালনাগাদকৃত নিরাপত্তায় কোনো দুর্বল PIN বা ক্লায়েন্ট পাসওয়ার্ড ব্যবহৃত হয় না। প্রতিটি অ্যাডমিন রিকোয়েস্ট ব্যাকএন্ডে Google-স্বাক্ষরিত Firebase ID Token ও ভেরিফায়েড Gmail দিয়ে যাচাই করা হয়।
                         </p>
                       </div>
                     </div>
@@ -1963,21 +2032,68 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         type="button"
                         onClick={handleSaveSecuritySettings}
                         disabled={isSavingSecurity}
-                        className="px-5 py-2 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-2 shadow-md hover:shadow-indigo-600/30 transition-all cursor-pointer disabled:opacity-60"
+                        className="px-5 py-2 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-2 shadow-md transition-all cursor-pointer disabled:opacity-60"
                       >
-                        {isSavingSecurity ? (
-                          <>
-                            <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                            <span>সংরক্ষণ হচ্ছে...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Save className="w-4 h-4" />
-                            <span>নিরাপত্তা সেটিংস সেভ করুন</span>
-                          </>
-                        )}
+                        <Save className="w-4 h-4" />
+                        <span>{isSavingSecurity ? "সংরক্ষণ হচ্ছে..." : "নিরাপত্তা সেটিংস সেভ করুন"}</span>
                       </button>
                     </div>
+                  </div>
+
+                  {/* Admin Audit Logs Card */}
+                  <div className="p-5 sm:p-6 rounded-3xl bg-slate-900 border border-slate-800 space-y-4 md:col-span-2">
+                    <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                      <div className="flex items-center gap-2">
+                        <ShieldAlert className="w-4 h-4 text-cyan-400" />
+                        <h3 className="text-sm font-bold text-white">Admin Audit Log (লগইন ও নিরাপত্তা ইতিহাস)</h3>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={loadAuditLogs}
+                        disabled={loadingAuditLogs}
+                        className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${loadingAuditLogs ? "animate-spin" : ""}`} />
+                        <span>রিফ্রেশ</span>
+                      </button>
+                    </div>
+
+                    {auditLogs.length === 0 ? (
+                      <p className="text-xs text-slate-500 py-4 text-center">এখনো কোনো অডিট লগ রেকর্ড হয়নি।</p>
+                    ) : (
+                      <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                        {auditLogs.map((entry) => (
+                          <div
+                            key={entry.id}
+                            className={`p-3 rounded-2xl border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
+                              entry.status === "denied"
+                                ? "bg-rose-950/20 border-rose-500/30 text-rose-200"
+                                : "bg-slate-950 border-slate-800 text-slate-300"
+                            }`}
+                          >
+                            <div className="space-y-0.5 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                    entry.status === "denied"
+                                      ? "bg-rose-500/20 text-rose-300"
+                                      : "bg-emerald-500/20 text-emerald-300"
+                                  }`}
+                                >
+                                  {entry.status}
+                                </span>
+                                <span className="font-mono font-semibold text-white">{entry.action}</span>
+                                <span className="text-[11px] text-cyan-300 font-mono">{entry.actorEmail}</span>
+                              </div>
+                              <p className="text-[11px] text-slate-400 truncate">{entry.details}</p>
+                            </div>
+                            <span className="text-[10px] text-slate-500 font-mono shrink-0">
+                              {new Date(entry.timestamp).toLocaleString("bn-BD")}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1987,6 +2103,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             {activeTab === "feature_control" && (
               <div className="animate-in fade-in duration-150">
                 <AdminFeatureControl />
+              </div>
+            )}
+
+            {/* TAB 16: UNIVERSAL SEARCH & MEDIA MANAGEMENT */}
+            {activeTab === "search_management" && (
+              <div className="animate-in fade-in duration-150">
+                <AdminSearchManager />
               </div>
             )}
 

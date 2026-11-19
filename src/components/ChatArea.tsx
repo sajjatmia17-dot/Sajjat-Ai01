@@ -19,10 +19,35 @@ import {
   Settings,
   Radio,
   Image as ImageIcon,
-  Star
+  Star,
+  ThumbsUp,
+  ThumbsDown,
+  Volume2,
+  Pause,
+  Play,
+  Square,
+  RotateCcw,
+  Share2,
 } from "lucide-react";
-import { ChatMessage, UserProfile, ModalType, GeminiModelId, AVAILABLE_MODELS, SystemSettingsConfig } from "../types";
+import { ChatMessage, UserProfile, ModalType, GeminiModelId, AVAILABLE_MODELS, SystemSettingsConfig, UniversalSearchResultItem } from "../types";
 import { GeneratedImageCard } from "./GeneratedImageCard";
+import { SearchResultsBlock } from "./SearchResultsBlock";
+import { findBestBanglaVoice } from "../utils/phoneControlHelpers";
+
+function stripMarkdownForSpeech(raw: string): string {
+  return (raw || "")
+    .replace(/```[\s\S]*?```/g, " কোড অংশ। ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/(\*\*|__|\*|_|~~)/g, "")
+    .replace(/^\s*[-*+\d.]+\s+/gm, "")
+    .replace(/\|/g, " ")
+    .replace(/\n+/g, "। ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 const THEME_GRADIENTS: Record<string, string> = {
   indigo: "from-indigo-600 via-purple-600 to-cyan-400",
@@ -149,7 +174,8 @@ interface ChatAreaProps {
   messages: ChatMessage[];
   isLoading: boolean;
   onSendPrompt: (prompt: string) => void;
-  onRetry: () => void;
+  onRetry: (promptOverride?: string) => void;
+  onFeedbackMessage?: (messageId: string, feedback: "like" | "dislike" | null) => void;
   onOpenModal?: (type: ModalType) => void;
   user: UserProfile | null;
   onDeleteMessage?: (messageId: string) => void;
@@ -157,12 +183,21 @@ interface ChatAreaProps {
   selectedModel: GeminiModelId;
   activeSessionTitle?: string;
   systemSettings?: SystemSettingsConfig | null;
+  onPlayAudioTrack?: (track: UniversalSearchResultItem, queue: UniversalSearchResultItem[]) => void;
+  onToggleFavorite?: (track: UniversalSearchResultItem) => void;
+  onAddToPlaylist?: (track: UniversalSearchResultItem) => void;
+  favoriteIds?: Set<string>;
+  playlistIds?: Set<string>;
+  activeTrackId?: string;
+  isAudioPlaying?: boolean;
 }
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
   messages,
   isLoading,
   onSendPrompt,
+  onRetry,
+  onFeedbackMessage,
   onOpenModal,
   user,
   onDeleteMessage,
@@ -170,13 +205,121 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   selectedModel,
   activeSessionTitle,
   systemSettings,
+  onPlayAudioTrack,
+  onToggleFavorite,
+  onAddToPlaylist,
+  favoriteIds,
+  playlistIds,
+  activeTrackId,
+  isAudioPlaying,
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [sharedId, setSharedId] = useState<string | null>(null);
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const [speechPaused, setSpeechPaused] = useState(false);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
 
-  const brandName = systemSettings?.aiBrandName || "Sajjat AI";
+  const speechSupported = typeof window !== "undefined" && "speechSynthesis" in window;
+  const readAloudAllowed = systemSettings?.readAloudEnabled !== false;
+
+  // Cancel any active speech synthesis on unmount
+  useEffect(() => {
+    return () => {
+      try {
+        if (typeof window !== "undefined" && "speechSynthesis" in window) {
+          window.speechSynthesis.cancel();
+        }
+      } catch {}
+    };
+  }, []);
+
+  const stopReading = () => {
+    try {
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+    } catch {}
+    setSpeakingId(null);
+    setSpeechPaused(false);
+  };
+
+  const startReading = (msgId: string, rawText: string) => {
+    if (!speechSupported || !readAloudAllowed) return;
+    const clean = stripMarkdownForSpeech(rawText);
+    if (!clean) return;
+
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(clean);
+      const hasBangla = /[\u0980-\u09FF]/.test(clean);
+      utterance.lang = hasBangla ? "bn-BD" : "en-US";
+      const voices = window.speechSynthesis.getVoices();
+      if (hasBangla) {
+        const bnVoiceResult = findBestBanglaVoice(voices);
+        if (bnVoiceResult.voice) utterance.voice = bnVoiceResult.voice;
+      } else {
+        const enVoice = voices.find((v) => v.lang.toLowerCase().startsWith("en"));
+        if (enVoice) utterance.voice = enVoice;
+      }
+      utterance.rate = Number(systemSettings?.liveVoiceSpeed || 1.0) || 1.0;
+
+      utterance.onend = () => {
+        setSpeakingId((cur) => (cur === msgId ? null : cur));
+        setSpeechPaused(false);
+      };
+      utterance.onerror = () => {
+        setSpeakingId((cur) => (cur === msgId ? null : cur));
+        setSpeechPaused(false);
+      };
+
+      setSpeakingId(msgId);
+      setSpeechPaused(false);
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      setSpeakingId(null);
+      setSpeechPaused(false);
+    }
+  };
+
+  const togglePauseResume = () => {
+    if (!speechSupported) return;
+    try {
+      if (speechPaused) {
+        window.speechSynthesis.resume();
+        setSpeechPaused(false);
+      } else {
+        window.speechSynthesis.pause();
+        setSpeechPaused(true);
+      }
+    } catch {
+      stopReading();
+    }
+  };
+
+  const handleShare = async (id: string, text: string) => {
+    try {
+      if (typeof navigator !== "undefined" && typeof (navigator as any).share === "function") {
+        await (navigator as any).share({
+          title: brandName,
+          text,
+        });
+        setSharedId(id);
+        setTimeout(() => setSharedId(null), 2000);
+        return;
+      }
+    } catch (err: any) {
+      if (err?.name === "AbortError") return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setSharedId(id);
+      setTimeout(() => setSharedId(null), 2000);
+    } catch {}
+  };
+
+  const brandName = systemSettings?.aiBrandName || "Sajjat Ai";
   const creatorName = systemSettings?.creatorName || "Sajjat Mia";
   const activeThemeColor = systemSettings?.aiThemeColor || "indigo";
   const themeGradient = THEME_GRADIENTS[activeThemeColor] || THEME_GRADIENTS.indigo;
@@ -248,6 +391,18 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       desc: "HTML, JS বা Python সমাধান",
       prompt: "JavaScript দিয়ে একটি আধুনিক রেসপনসিভ ক্যালকুলেটরের কোড লিখে দাও।",
       icon: <Code className="w-4 h-4 text-emerald-400" />
+    },
+    {
+      title: "গান ও অডিও খুঁজুন",
+      desc: "বাংলা/ইংরেজি গান, পডকাস্ট ও ইন-অ্যাপ প্লেয়ার",
+      prompt: "বাংলা রোমান্টিক ও জনপ্রিয় গান খুঁজে দিন",
+      icon: <Radio className="w-4 h-4 text-cyan-400" />
+    },
+    {
+      title: "ভিডিও ও সংবাদ সার্চ",
+      desc: "YouTube ভিডিও ও সর্বশেষ যাচাইকৃত খবর",
+      prompt: "আজকের সর্বশেষ প্রযুক্তি ও বিশ্ব সংবাদ খুঁজে দিন",
+      icon: <Compass className="w-4 h-4 text-rose-400" />
     }
   ];
 
@@ -463,13 +618,31 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       />
                     )}
 
-                    {/* Actions for Message (Copy, Speak, Delete) */}
-                    <div className="flex items-center gap-1 mt-1 px-1 text-slate-400">
-                      {/* Copy button */}
+                    {/* Universal Internet, Video, Audio, Image & Document Search Results */}
+                    {msg.universalSearch && (
+                      <SearchResultsBlock
+                        payload={msg.universalSearch}
+                        onPlayAudioTrack={onPlayAudioTrack || (() => {})}
+                        onToggleFavorite={onToggleFavorite || (() => {})}
+                        onAddToPlaylist={onAddToPlaylist || (() => {})}
+                        favoriteIds={favoriteIds || new Set()}
+                        playlistIds={playlistIds || new Set()}
+                        activeTrackId={activeTrackId}
+                        isAudioPlaying={isAudioPlaying}
+                        downloadPermissionEnabled={
+                          systemSettings?.universalSearch?.downloadPermissionEnabled !== false
+                        }
+                      />
+                    )}
+
+                    {/* Actions for Message (Copy, Like, Dislike, Read Aloud, Retry, Share, Delete) */}
+                    <div className="flex flex-wrap items-center gap-1 mt-1.5 px-1 text-slate-400">
+                      {/* Copy */}
                       <button
+                        type="button"
                         onClick={() => handleCopy(msg.id, msg.text)}
-                        className="p-1.5 rounded-lg hover:text-white hover:bg-slate-800/80 transition-colors text-xs flex items-center gap-1"
-                        title="মেসেজ কপি করুন"
+                        className="p-1.5 rounded-lg hover:text-white hover:bg-slate-800/80 transition-colors text-xs flex items-center gap-1 cursor-pointer"
+                        title="কপি করুন"
                       >
                         {isCopied ? (
                           <>
@@ -484,13 +657,146 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         )}
                       </button>
 
+                      {/* Bot-only feedback, speech, retry, and share actions */}
+                      {!isUser && (
+                        <>
+                          {/* Like */}
+                          {onFeedbackMessage && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onFeedbackMessage(
+                                  msg.id,
+                                  msg.feedback === "like" ? null : "like"
+                                )
+                              }
+                              className={`p-1.5 rounded-lg transition-colors text-xs flex items-center gap-1 cursor-pointer ${
+                                msg.feedback === "like"
+                                  ? "text-emerald-400 bg-emerald-500/15 border border-emerald-500/30"
+                                  : "hover:text-emerald-400 hover:bg-slate-800/80"
+                              }`}
+                              title="পছন্দ হয়েছে (Like)"
+                            >
+                              <ThumbsUp className="w-3.5 h-3.5" />
+                            </button>
+                          )}
 
+                          {/* Dislike */}
+                          {onFeedbackMessage && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onFeedbackMessage(
+                                  msg.id,
+                                  msg.feedback === "dislike" ? null : "dislike"
+                                )
+                              }
+                              className={`p-1.5 rounded-lg transition-colors text-xs flex items-center gap-1 cursor-pointer ${
+                                msg.feedback === "dislike"
+                                  ? "text-rose-400 bg-rose-500/15 border border-rose-500/30"
+                                  : "hover:text-rose-400 hover:bg-slate-800/80"
+                              }`}
+                              title="উন্নতি প্রয়োজন (Dislike)"
+                            >
+                              <ThumbsDown className="w-3.5 h-3.5" />
+                            </button>
+                          )}
 
-                      {/* Delete this single message */}
+                          {/* Read Aloud / Pause / Resume / Stop Reading */}
+                          {readAloudAllowed && (
+                            speakingId === msg.id ? (
+                              <div className="inline-flex items-center gap-1 bg-indigo-500/15 border border-indigo-500/30 rounded-lg px-1.5 py-0.5">
+                                <button
+                                  type="button"
+                                  onClick={togglePauseResume}
+                                  className="p-1 text-indigo-300 hover:text-white flex items-center gap-1 text-[10px] font-semibold cursor-pointer"
+                                  title={speechPaused ? "চালু করুন (Resume)" : "বিরতি (Pause)"}
+                                >
+                                  {speechPaused ? (
+                                    <>
+                                      <Play className="w-3 h-3" />
+                                      <span>Resume</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Pause className="w-3 h-3" />
+                                      <span>Pause</span>
+                                    </>
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={stopReading}
+                                  className="p-1 text-rose-400 hover:text-rose-300 flex items-center gap-1 text-[10px] font-semibold cursor-pointer"
+                                  title="পড়া বন্ধ করুন (Stop Reading)"
+                                >
+                                  <Square className="w-3 h-3 fill-current" />
+                                  <span>Stop</span>
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={!speechSupported}
+                                onClick={() => startReading(msg.id, msg.text)}
+                                className="p-1.5 rounded-lg hover:text-indigo-300 hover:bg-slate-800/80 transition-colors text-xs flex items-center gap-1 disabled:opacity-40 cursor-pointer"
+                                title={
+                                  speechSupported
+                                    ? "পড়ে শোনান (Read Aloud)"
+                                    : "এই ব্রাউজারে স্পিচ সিনথেসিস সমর্থিত নয়"
+                                }
+                              >
+                                <Volume2 className="w-3.5 h-3.5" />
+                                <span className="text-[10px] hidden sm:inline">শুনুন</span>
+                              </button>
+                            )
+                          )}
+
+                          {/* Retry */}
+                          <button
+                            type="button"
+                            disabled={isLoading}
+                            onClick={() => {
+                              const prevUser = [...messages.slice(0, idx)]
+                                .reverse()
+                                .find((m) => m.sender === "user");
+                              onRetry(prevUser?.text);
+                            }}
+                            className="p-1.5 rounded-lg hover:text-amber-300 hover:bg-slate-800/80 transition-colors text-xs flex items-center gap-1 disabled:opacity-40 cursor-pointer"
+                            title="আবার চেষ্টা করুন (Retry)"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span className="text-[10px] hidden sm:inline">Retry</span>
+                          </button>
+
+                          {/* Share */}
+                          <button
+                            type="button"
+                            onClick={() => handleShare(msg.id, msg.text)}
+                            className="p-1.5 rounded-lg hover:text-cyan-300 hover:bg-slate-800/80 transition-colors text-xs flex items-center gap-1 cursor-pointer"
+                            title="শেয়ার করুন"
+                          >
+                            {sharedId === msg.id ? (
+                              <>
+                                <Check className="w-3.5 h-3.5 text-cyan-400" />
+                                <span className="text-[10px] text-cyan-400">শেয়ার/কপি হয়েছে</span>
+                              </>
+                            ) : (
+                              <>
+                                <Share2 className="w-3.5 h-3.5" />
+                                <span className="text-[10px] hidden sm:inline">শেয়ার</span>
+                              </>
+                            )}
+                          </button>
+                        </>
+                      )}
+
+                      {/* Delete single message */}
                       {onDeleteMessage && (
                         <button
+                          type="button"
                           onClick={() => onDeleteMessage(msg.id)}
-                          className="opacity-0 group-hover/msg:opacity-100 p-1.5 rounded-lg hover:text-rose-400 hover:bg-rose-500/10 transition-all text-xs flex items-center gap-1 text-slate-500"
+                          className="opacity-0 group-hover/msg:opacity-100 p-1.5 rounded-lg hover:text-rose-400 hover:bg-rose-500/10 transition-all text-xs flex items-center gap-1 text-slate-500 cursor-pointer"
                           title="এই মেসেজটি মুছুন"
                         >
                           <Trash2 className="w-3 h-3 text-rose-400/80" />

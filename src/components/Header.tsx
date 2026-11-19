@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import { useRef } from "react";
 import { 
   Bot, 
   Settings, 
@@ -9,11 +9,11 @@ import {
   CheckCircle2,
   Sparkles,
   Bell,
-  ShieldCheck,
   BrainCircuit,
   Zap,
   Star,
-  LogOut
+  LogOut,
+  PhoneCall
 } from "lucide-react";
 import { UserProfile, ModalType, SystemSettingsConfig } from "../types";
 
@@ -23,10 +23,11 @@ interface HeaderProps {
   onOpenModal: (type: ModalType) => void;
   onToggleSidebar: () => void;
   onNewChat: () => void;
-  onOpenAdmin?: () => void;
+  onStartVoiceCall?: () => void;
   systemSettings?: SystemSettingsConfig | null;
   onOpenPremium?: () => void;
   onLogout?: () => void;
+  onSecretAdminTrigger?: () => void;
 }
 
 const THEME_GRADIENTS: Record<string, string> = {
@@ -45,53 +46,35 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenModal,
   onToggleSidebar,
   onNewChat,
-  onOpenAdmin,
+  onStartVoiceCall,
   systemSettings,
   onOpenPremium,
   onLogout,
+  onSecretAdminTrigger,
 }) => {
-  const [tapCount, setTapCount] = useState(0);
-  const tapTimeoutRef = useRef<any>(null);
+  const tapCountRef = useRef(0);
+  const lastTapRef = useRef(0);
+  const requiredTaps = Math.max(5, systemSettings?.adminTapCount || 7);
 
-  const getRequiredTaps = (): number => {
-    if (typeof systemSettings?.adminTapCount === "number" && systemSettings.adminTapCount > 0) {
-      return systemSettings.adminTapCount;
+  const handleLogoClick = () => {
+    const now = Date.now();
+    if (now - lastTapRef.current > 2200) {
+      tapCountRef.current = 1;
+    } else {
+      tapCountRef.current += 1;
     }
-    try {
-      const cached = typeof window !== "undefined" ? localStorage.getItem("sajjat_ai_system_settings") : null;
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        if (typeof parsed?.adminTapCount === "number" && parsed.adminTapCount > 0) {
-          return parsed.adminTapCount;
-        }
+    lastTapRef.current = now;
+
+    if (tapCountRef.current >= requiredTaps) {
+      tapCountRef.current = 0;
+      if (onSecretAdminTrigger) {
+        onSecretAdminTrigger();
+        return;
       }
-    } catch (e) {}
-    return 7;
-  };
-
-  const requiredTaps = getRequiredTaps();
-
-  // Secret Tap Trigger for Admin Access
-  const handleLogoTap = () => {
-    if (tapTimeoutRef.current) {
-      clearTimeout(tapTimeoutRef.current);
     }
-
-    const nextCount = tapCount + 1;
-    if (nextCount >= requiredTaps) {
-      setTapCount(0);
-      if (onOpenAdmin) {
-        onOpenAdmin();
-      } else {
-        onOpenModal("admin_login");
-      }
-      return;
+    if (tapCountRef.current === 1) {
+      onNewChat();
     }
-
-    setTapCount(nextCount);
-    tapTimeoutRef.current = setTimeout(() => {
-      setTapCount(0);
-    }, 2500);
   };
 
   const activeThemeColor = systemSettings?.aiThemeColor || "indigo";
@@ -117,7 +100,7 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="h-15 border-b border-slate-800/80 bg-slate-900/95 backdrop-blur-md px-3 sm:px-4 flex items-center justify-between sticky top-0 z-30 transition-colors">
       {/* Left: Sidebar ☰ Toggle & Logo / Name */}
-      <div className="flex items-center gap-2.5 sm:gap-3">
+      <div className="flex items-center gap-2 sm:gap-3">
         <button
           id="toggle-sidebar-btn"
           onClick={onToggleSidebar}
@@ -127,11 +110,11 @@ export const Header: React.FC<HeaderProps> = ({
           <Menu className="w-5 h-5" />
         </button>
 
-        {/* Logo and Name with 7-Tap Secret Admin Handler */}
+        {/* Logo and Name */}
         <div 
-          onClick={handleLogoTap}
-          className="flex items-center gap-2.5 sm:gap-3 cursor-pointer select-none group relative active:scale-95 transition-transform shrink-0"
-          title={brandName}
+          onClick={handleLogoClick}
+          className="flex items-center gap-2 sm:gap-2.5 cursor-pointer select-none group relative active:scale-95 transition-transform shrink-0"
+          title={`${brandName} - নতুন চ্যাট`}
         >
           <div className="relative shrink-0">
             <div className={`w-9 h-9 sm:w-10 sm:h-10 rounded-2xl bg-gradient-to-tr ${themeGradient} p-0.5 shadow-md shadow-indigo-500/20 flex items-center justify-center group-hover:shadow-indigo-500/40 transition-shadow`}>
@@ -140,22 +123,29 @@ export const Header: React.FC<HeaderProps> = ({
               </div>
             </div>
             <span 
-              className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 border-2 border-slate-900 rounded-full" 
+              className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 border-2 border-slate-900 rounded-full animate-pulse" 
               title="Online"
             />
           </div>
 
           <div className="flex items-center gap-1.5">
-            <h1 className="text-lg sm:text-xl font-bold tracking-tight text-white flex items-center leading-none whitespace-nowrap">
+            <h1 className="text-base sm:text-lg font-bold tracking-tight text-white flex items-center leading-none whitespace-nowrap">
               <span>{brandName}</span>
             </h1>
-            {tapCount >= 3 && (
-              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse">
-                {tapCount}/{requiredTaps}
-              </span>
-            )}
           </div>
         </div>
+
+        {/* Live Call Pill Button (Screenshot Match) */}
+        {onStartVoiceCall && (
+          <button
+            onClick={onStartVoiceCall}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-cyan-950/70 hover:bg-cyan-900/80 border border-cyan-500/40 text-cyan-300 text-xs font-semibold shadow-sm shadow-cyan-500/10 transition-all active:scale-95 cursor-pointer"
+            title="Sajjat AI-এর সাথে সরাসরি ভয়েস কল করুন"
+          >
+            <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+            <PhoneCall className="w-3.5 h-3.5 text-cyan-400" />
+          </button>
+        )}
       </div>
 
       {/* Right Controls */}

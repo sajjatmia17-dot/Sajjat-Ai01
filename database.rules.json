@@ -1,0 +1,88 @@
+{
+  "rules": {
+    "system_settings": {
+      ".read": true,
+      ".write": "auth != null && auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true"
+    },
+    "app_content": {
+      ".read": true,
+      ".write": "auth != null && auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true"
+    },
+    "admin_ai_settings": {
+      ".read": true,
+      ".write": "auth != null && auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true"
+    },
+    "admin_config": {
+      ".read": "auth != null && auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true",
+      ".write": "auth != null && auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true"
+    },
+    "admin_audit_logs": {
+      ".read": "auth != null && auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true",
+      ".write": "auth != null && auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true"
+    },
+    "books": {
+      ".read": true,
+      ".write": "auth != null && auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true"
+    },
+    "notifications": {
+      ".read": true,
+      "$notifId": {
+        ".write": "auth != null && auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true",
+        "readBy": {
+          "$uid": {
+            ".write": "auth != null && auth.uid == $uid"
+          }
+        }
+      }
+    },
+    "packages": {
+      ".read": true,
+      ".write": "auth != null && auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true"
+    },
+    "purchase_requests": {
+      ".read": "auth != null && (auth.token.email == 'sajjatmia17@gmail.com' || data.child('userId').val() == auth.uid)",
+      "$reqId": {
+        ".write": "auth != null && ((auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true) || (!data.exists() && newData.child('userId').val() == auth.uid && newData.child('status').val() == 'pending'))"
+      }
+    },
+    "registered_users": {
+      ".read": "auth != null && auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true",
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null && ((auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true) || (auth.uid == $uid && (!newData.hasChild('status') || newData.child('status').val() == 'active' || (data.exists() && newData.child('status').val() == data.child('status').val()))))"
+      }
+    },
+    "users": {
+      ".read": "auth != null && auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true",
+      "$uid": {
+        ".read": "auth != null && (auth.uid == $uid || (auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true))",
+        "profile": {
+          ".write": "auth != null && ((auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true) || (auth.uid == $uid && (!newData.hasChild('status') || newData.child('status').val() == 'active' || (data.exists() && newData.child('status').val() == data.child('status').val()))))"
+        },
+        "chats": {
+          ".write": "auth != null && (auth.uid == $uid || (auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true))"
+        },
+        "audio_library": {
+          ".write": "auth != null && auth.uid == $uid"
+        },
+        "ai_limit": {
+          ".write": "auth != null && auth.token.email == 'sajjatmia17@gmail.com' && auth.token.email_verified == true"
+        }
+      }
+    },
+    "live_community_chat": {
+      "messages": {
+        ".read": true,
+        "$msgId": {
+          ".write": "auth != null || newData.child('isGuest').val() == true"
+        }
+      },
+      "presence": {
+        ".read": true,
+        "$uid": {
+          ".write": true
+        }
+      }
+    }
+  }
+}

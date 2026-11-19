@@ -1,40 +1,32 @@
-import { ChatMessage, AttachedFile } from "./types";
+import {
+  ChatMessage,
+  AttachedFile,
+  UniversalSearchAdminConfig,
+  UniversalSearchCategory,
+  UniversalSearchPayload,
+  UniversalSearchStatsResponse,
+  ApiProviderConfig,
+  ProviderFeatureCapabilities,
+  ProviderApiType,
+  ProviderAuthMethod,
+} from "./types";
 import { generateClientFallbackReply } from "./knowledge";
-import { database } from "./firebase";
-import { ref, get } from "firebase/database";
+import { getFirebaseAuthHeaders } from "./firebase";
 
 export function getBackendBaseUrl(): string {
   if (typeof window === "undefined") return "";
 
-  // 1. Explicit VITE_BACKEND_URL has the absolute highest priority
+  // 1. Explicit VITE_BACKEND_URL has the highest priority when configured
   let envUrl = (import.meta as any).env?.VITE_BACKEND_URL;
   if (envUrl && typeof envUrl === "string" && envUrl.trim().length > 0) {
-    envUrl = envUrl.trim();
-    if (envUrl.endsWith("/")) {
-      envUrl = envUrl.slice(0, -1);
-    }
-    // Ensure we are not pointing backend to a netlify app or back to the frontend host itself
-    if (!envUrl.includes("netlify.app") && !envUrl.includes(window.location.hostname)) {
+    envUrl = envUrl.trim().replace(/\/+$/, "");
+    if (!envUrl.includes(window.location.hostname)) {
       return envUrl;
     }
   }
 
-  // 2. Auto-detect local development or Google AI Studio preview
-  const host = window.location.hostname;
-  if (
-    host.includes("localhost") || 
-    host.includes("127.0.0.1") || 
-    host.includes("asia-southeast1.run.app")
-  ) {
-    let origin = window.location.origin;
-    if (origin.endsWith("/")) {
-      origin = origin.slice(0, -1);
-    }
-    return origin;
-  }
-
-  // 3. Fallback to the production Cloud Run URL (Static host / Netlify production environment)
-  return "https://ais-pre-muefpa2tovs5je5tgghvb7-797513251199.asia-southeast1.run.app";
+  // 2. Same origin works seamlessly for Express dev/Cloud Run AND Netlify Functions (/api/* redirects)
+  return window.location.origin.replace(/\/+$/, "");
 }
 
 export function getBackendWsUrl(): string {
@@ -62,9 +54,22 @@ interface SendChatParams {
 export interface ChatResponse {
   reply: string;
   model?: string;
+  providerId?: string;
+  providerName?: string;
+  fallbackUsed?: boolean;
+  fallbackFrom?: string;
+  latencyMs?: number;
   timestamp?: string;
   generatedImageUrl?: string;
   generatedImagePrompt?: string;
+}
+
+export interface PublicAiCapabilities {
+  activeProviderId: string;
+  activeProviderName: string;
+  activeModel: string;
+  supportedFeatures: ProviderFeatureCapabilities;
+  enabledTextProvidersCount: number;
 }
 
 export interface GenerateImageParams {
@@ -469,7 +474,7 @@ export async function generateAiImageApi(params: GenerateImageParams): Promise<G
           debugInfo: data.debugInfo || {
             userPrompt: params.prompt,
             finalImagePrompt: params.prompt,
-            modelUsed: params.engine || "Gemini Image Model",
+            modelUsed: params.engine || "Sajjat Ai Image Engine",
             apiStatus: "Error"
           }
         };
@@ -482,218 +487,154 @@ export async function generateAiImageApi(params: GenerateImageParams): Promise<G
     clearTimeout(timeoutId);
   }
 
-  // Seamless fallback for Netlify / Static hosting
+  // Seamless open render fallback when backend endpoint is unavailable
   return clientDirectImageGeneration(params);
 }
 
-async function sendChatMessageDirectToProvider(params: SendChatParams): Promise<ChatResponse> {
-  const { message, history = [], imageBase64, imageMimeType, attachedFile } = params;
-
+export async function fetchPublicAiCapabilities(): Promise<PublicAiCapabilities> {
+  const defaultCaps: PublicAiCapabilities = {
+    activeProviderId: "gemini",
+    activeProviderName: "Sajjat Ai Engine",
+    activeModel: "gemini-4-hydrogen",
+    supportedFeatures: {
+      textChat: true,
+      imageVision: true,
+      fileUpload: true,
+      voice: true,
+      imageGen: true,
+    },
+    enabledTextProvidersCount: 1,
+  };
   try {
-    // 1. Get active provider & settings from Firebase RTDB
-    let activeProviderId = "gemini";
-    let activeModelId = "gemini-3.8-flash";
-    let systemInstruction = "";
-
-    try {
-      const settingsSnap = await get(ref(database, "system_settings"));
-      if (settingsSnap.exists()) {
-        const settings = settingsSnap.val();
-        if (settings.activeProvider) activeProviderId = settings.activeProvider;
-        if (settings.activeModel) activeModelId = settings.activeModel;
-        if (settings.systemInstruction) systemInstruction = settings.systemInstruction;
-      }
-    } catch (dbErr) {
-      console.warn("Failed to read system_settings for client fallback:", dbErr);
+    const res = await fetch(`${getBackendBaseUrl()}/api/ai-capabilities`, {
+      method: "GET",
+      cache: "no-store",
+    });
+    if (!res.ok) return defaultCaps;
+    const data = await res.json();
+    if (data && data.supportedFeatures) {
+      return data as PublicAiCapabilities;
     }
-
-    // 2. Get the credentials for this provider
-    let apiKey = "";
-    let providerModelId = activeModelId;
-
-    try {
-      const providerSnap = await get(ref(database, `admin_config/api_providers/${activeProviderId}`));
-      if (providerSnap.exists()) {
-        const providerConfig = providerSnap.val();
-        if (providerConfig.apiKey) apiKey = providerConfig.apiKey;
-        if (providerConfig.modelId) providerModelId = providerConfig.modelId;
-      }
-    } catch (pErr) {
-      console.warn(`Failed to read provider ${activeProviderId} config:`, pErr);
-    }
-
-    // 3. Last-resort fallback for Gemini key
-    if (!apiKey) {
-      activeProviderId = "gemini";
-      const userCustomKey = localStorage.getItem("sajjat_custom_gemini_key");
-      apiKey = userCustomKey || (import.meta as any).env?.VITE_GEMINI_API_KEY || "";
-      providerModelId = "gemini-3.8-flash";
-    }
-
-    const cleanModel = providerModelId || "gemini-3.6-flash";
-
-    // 4. Make direct request depending on the provider ID
-    if (activeProviderId === "gemini") {
-      const contents = history.map((msg) => ({
-        role: msg.sender === "user" ? "user" : "model",
-        parts: [{ text: msg.text }],
-      }));
-
-      let promptText = message;
-      if (attachedFile && !attachedFile.isImage && attachedFile.content) {
-        promptText = `[File attached: ${attachedFile.name}]\n\nFile Content:\n${attachedFile.content}\n\nUser Question:\n${message}`;
-      }
-
-      if (imageBase64 || (attachedFile && attachedFile.isImage && attachedFile.base64)) {
-        const imgB64 = imageBase64 || attachedFile?.base64 || "";
-        const imgMime = imageMimeType || attachedFile?.type || "image/jpeg";
-        const cleanB64 = imgB64.includes(",") ? imgB64.split(",")[1] : imgB64;
-
-        contents.push({
-          role: "user",
-          parts: [
-            { inlineData: { mimeType: imgMime, data: cleanB64 } },
-            { text: promptText }
-          ] as any,
-        });
-      } else {
-        contents.push({
-          role: "user",
-          parts: [{ text: promptText }],
-        });
-      }
-
-      const reqBody: any = {
-        contents,
-        generationConfig: {
-          temperature: 0.7,
-        },
-      };
-
-      if (systemInstruction) {
-        reqBody.systemInstruction = {
-          parts: [{ text: systemInstruction }],
-        };
-      }
-
-      const geminiModelAlias = cleanModel
-        .replace("gemini-1.5-flash", "gemini-3.6-flash")
-        .replace("gemini-2.5-flash", "gemini-3.6-flash")
-        .replace("gemini-2.0-flash", "gemini-3.6-flash");
-
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${geminiModelAlias}:generateContent?key=${apiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(reqBody),
-        }
-      );
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Gemini direct API error: ${res.status} - ${errText}`);
-      }
-
-      const data = await res.json();
-      const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!reply) {
-        throw new Error("No response text found in Gemini payload.");
-      }
-
-      return {
-        reply,
-        model: `Sajjat AI (${geminiModelAlias} client)`,
-        timestamp: new Date().toISOString(),
-      };
-    } else {
-      let endpoint = "https://openrouter.ai/api/v1/chat/completions";
-      if (activeProviderId === "grok") endpoint = "https://api.x.ai/v1/chat/completions";
-      else if (activeProviderId === "deepseek") endpoint = "https://api.deepseek.com/chat/completions";
-      else if (activeProviderId === "cerebras") endpoint = "https://api.cerebras.ai/v1/chat/completions";
-      else if (activeProviderId === "mistral") endpoint = "https://api.mistral.ai/v1/chat/completions";
-
-      const messages: any[] = [];
-      if (systemInstruction) {
-        messages.push({ role: "system", content: systemInstruction });
-      }
-
-      history.forEach((msg) => {
-        messages.push({
-          role: msg.sender === "user" ? "user" : "assistant",
-          content: msg.text,
-        });
-      });
-
-      let promptText = message;
-      if (attachedFile && !attachedFile.isImage && attachedFile.content) {
-        promptText = `[File: ${attachedFile.name}]\n\n${attachedFile.content}\n\nQuestion:\n${message}`;
-      }
-
-      if (imageBase64 || (attachedFile && attachedFile.isImage && attachedFile.base64)) {
-        const imgB64 = imageBase64 || attachedFile?.base64 || "";
-        const imgMime = imageMimeType || attachedFile?.type || "image/jpeg";
-        const finalUrl = imgB64.startsWith("data:") ? imgB64 : `data:${imgMime};base64,${imgB64}`;
-
-        messages.push({
-          role: "user",
-          content: [
-            { type: "text", text: promptText },
-            { type: "image_url", image_url: { url: finalUrl } },
-          ],
-        });
-      } else {
-        messages.push({
-          role: "user",
-          content: promptText,
-        });
-      }
-
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: cleanModel,
-          messages,
-          temperature: 0.7,
-        }),
-      });
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`${activeProviderId} direct completion error: ${res.status} - ${errText}`);
-      }
-
-      const data = await res.json();
-      const reply = data.choices?.[0]?.message?.content;
-      if (!reply) {
-        throw new Error(`Empty reply from ${activeProviderId}.`);
-      }
-
-      return {
-        reply,
-        model: `Sajjat AI (${activeProviderId} direct)`,
-        timestamp: new Date().toISOString(),
-      };
-    }
-  } catch (err: any) {
-    console.error("Direct client API call failed:", err);
-    throw err;
+  } catch {
+    // ignore network failure
   }
+  return defaultCaps;
+}
+
+export async function fetchAdminProvidersApi(): Promise<{
+  success: boolean;
+  activeProviderId: string;
+  providers: ApiProviderConfig[];
+  error?: string;
+}> {
+  const authHeaders = await getFirebaseAuthHeaders();
+  const res = await fetch(`${getBackendBaseUrl()}/api/admin/providers`, {
+    method: "GET",
+    headers: authHeaders,
+    cache: "no-store",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return {
+      success: false,
+      activeProviderId: "gemini",
+      providers: [],
+      error: data?.error || `HTTP ${res.status}`,
+    };
+  }
+  return {
+    success: true,
+    activeProviderId: data.activeProviderId || "gemini",
+    providers: Array.isArray(data.providers) ? data.providers : [],
+  };
+}
+
+export async function saveAdminProviderApi(payload: {
+  id?: string;
+  name?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  modelId?: string;
+  apiType?: ProviderApiType;
+  authMethod?: ProviderAuthMethod;
+  customAuthHeaderName?: string;
+  priority?: number;
+  enabled?: boolean;
+  active?: boolean;
+  isCustom?: boolean;
+  supportedFeatures?: Partial<ProviderFeatureCapabilities>;
+  description?: string;
+}): Promise<{
+  success: boolean;
+  provider?: ApiProviderConfig;
+  providers?: ApiProviderConfig[];
+  activeProviderId?: string;
+  error?: string;
+}> {
+  const authHeaders = await getFirebaseAuthHeaders();
+  const res = await fetch(`${getBackendBaseUrl()}/api/admin/providers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return { success: false, error: data?.error || `HTTP ${res.status}` };
+  }
+  return data;
+}
+
+export async function deleteAdminProviderApi(id: string): Promise<{
+  success: boolean;
+  providers?: ApiProviderConfig[];
+  activeProviderId?: string;
+  error?: string;
+}> {
+  const authHeaders = await getFirebaseAuthHeaders();
+  const res = await fetch(`${getBackendBaseUrl()}/api/admin/providers/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: authHeaders,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return { success: false, error: data?.error || `HTTP ${res.status}` };
+  }
+  return data;
+}
+
+export async function testAdminProviderApi(payload: {
+  providerId?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  modelId?: string;
+  apiType?: ProviderApiType;
+  authMethod?: ProviderAuthMethod;
+  customAuthHeaderName?: string;
+}): Promise<{
+  success: boolean;
+  latencyMs?: number;
+  reply?: string;
+  error?: string;
+  rateLimitHeaders?: Record<string, string> | null;
+}> {
+  const authHeaders = await getFirebaseAuthHeaders();
+  const res = await fetch(`${getBackendBaseUrl()}/api/admin/test-provider`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders },
+    body: JSON.stringify(payload),
+  });
+  return await res.json().catch(() => ({ success: false, error: `HTTP ${res.status}` }));
 }
 
 export async function sendChatMessage(params: SendChatParams): Promise<ChatResponse> {
-  const { 
-    message, 
-    history = [], 
-    imageBase64, 
-    imageMimeType, 
+  const {
+    message,
+    history = [],
+    imageBase64,
+    imageMimeType,
     attachedFile,
     model,
-    uid
+    uid,
   } = params;
 
   // Check if message is requesting image generation
@@ -705,8 +646,8 @@ export async function sendChatMessage(params: SendChatParams): Promise<ChatRespo
           reply: imgRes.caption || "আমি আপনার অনুরোধ অনুযায়ী ছবিটি তৈরি করেছি! নিচে ছবিটি দেখুন।",
           generatedImageUrl: imgRes.imageUrl || imgRes.directUrl,
           generatedImagePrompt: imgRes.refinedPrompt || message,
-          model: "Sajjat AI (Gemini Image)",
-          timestamp: new Date().toISOString()
+          model: "Sajjat Ai Studio",
+          timestamp: new Date().toISOString(),
         };
       }
     } catch (e) {
@@ -714,33 +655,11 @@ export async function sendChatMessage(params: SendChatParams): Promise<ChatRespo
     }
   }
 
-  const isLocalOrStudio = typeof window !== "undefined" && (
-    window.location.hostname.includes("localhost") || 
-    window.location.hostname.includes("127.0.0.1") || 
-    window.location.hostname.includes("asia-southeast1.run.app") || 
-    window.location.hostname.includes("google.com")
-  );
-  const isNetlify = !isLocalOrStudio;
-
-  if (isNetlify) {
-    try {
-      const directResponse = await sendChatMessageDirectToProvider(params);
-      return directResponse;
-    } catch (directErr: any) {
-      console.error("Direct Netlify provider call failed:", directErr);
-      return {
-        reply: generateClientFallbackReply(message, attachedFile?.name),
-        model: "Sajjat AI Neural Core (Netlify Backup)",
-        timestamp: new Date().toISOString()
-      };
-    }
-  }
-
-  // Try API call with 1 auto-retry
+  // Always call server-side /api/chat (express backend or Netlify ai-gateway function) — NEVER expose keys in browser
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       if (attempt > 0) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await new Promise((resolve) => setTimeout(resolve, 450));
       }
 
       const res = await fetch(`${getBackendBaseUrl()}/api/chat`, {
@@ -761,42 +680,37 @@ export async function sendChatMessage(params: SendChatParams): Promise<ChatRespo
       });
 
       const contentType = res.headers.get("content-type") || "";
-      if (res.ok && contentType.includes("application/json")) {
-        const data: ChatResponse = await res.json();
-        return data;
-      }
-
-      if (attempt === 1) {
-        throw new Error(`সার্ভার ত্রুটি: ${res.status}`);
+      if (contentType.includes("application/json")) {
+        const data = await res.json();
+        if (res.ok && data?.reply) {
+          return data as ChatResponse;
+        }
+        if (attempt === 1) {
+          throw new Error(data?.error || `সার্ভার ত্রুটি (${res.status})`);
+        }
+      } else if (attempt === 1) {
+        throw new Error(`সার্ভার ত্রুটি (${res.status})`);
       }
     } catch (networkError: any) {
       if (attempt === 1) {
-        console.warn("API network call failed, activating direct client provider proxy:", networkError?.message);
-        try {
-          const directResponse = await sendChatMessageDirectToProvider(params);
-          return directResponse;
-        } catch (directErr: any) {
-          console.warn("Direct client provider proxy also failed, falling back to local script:", directErr?.message);
-          return {
-            reply: generateClientFallbackReply(message, attachedFile?.name),
-            model: "Sajjat AI Neural Core (Offline)",
-            timestamp: new Date().toISOString()
-          };
+        console.warn("Server /api/chat error:", networkError?.message);
+        if (networkError?.message && !networkError.message.includes("Failed to fetch")) {
+          throw networkError;
         }
+        return {
+          reply: generateClientFallbackReply(message, attachedFile?.name),
+          model: "Sajjat Ai Offline Core",
+          timestamp: new Date().toISOString(),
+        };
       }
     }
   }
 
-  try {
-    const directResponse = await sendChatMessageDirectToProvider(params);
-    return directResponse;
-  } catch (directErr) {
-    return {
-      reply: generateClientFallbackReply(message, attachedFile?.name),
-      model: "Sajjat AI Assistant",
-      timestamp: new Date().toISOString()
-    };
-  }
+  return {
+    reply: generateClientFallbackReply(message, attachedFile?.name),
+    model: "Sajjat Ai Offline Core",
+    timestamp: new Date().toISOString(),
+  };
 }
 
 export interface EditImageParams {
@@ -851,5 +765,118 @@ export async function editAiImageApi(params: EditImageParams): Promise<EditImage
     };
   }
 }
+
+export interface RunUniversalSearchParams {
+  query: string;
+  forcedCategory?: UniversalSearchCategory;
+  uid?: string;
+  userName?: string;
+}
+
+export interface RunUniversalSearchResponse extends UniversalSearchPayload {
+  success: boolean;
+  timestamp?: string;
+  error?: string;
+}
+
+export async function runUniversalSearchApi(
+  params: RunUniversalSearchParams
+): Promise<RunUniversalSearchResponse> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 22000);
+
+  try {
+    const res = await fetch(`${getBackendBaseUrl()}/api/universal-search/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    const contentType = res.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const data = await res.json();
+      if (!res.ok) {
+        return {
+          success: false,
+          intent: "chat",
+          refinedQuery: params.query,
+          summaryMarkdown: "",
+          results: [],
+          sourcesUsed: [],
+          error: data?.error || `সার্ভার ত্রুটি (${res.status})`,
+        };
+      }
+      return data as RunUniversalSearchResponse;
+    }
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    console.warn("Universal search API unavailable, falling back to regular chat:", err?.message);
+  }
+
+  return {
+    success: false,
+    intent: "chat",
+    refinedQuery: params.query,
+    summaryMarkdown: "",
+    results: [],
+    sourcesUsed: [],
+  };
+}
+
+export async function fetchUniversalSearchStatsApi(): Promise<
+  (UniversalSearchStatsResponse & { success: boolean }) | null
+> {
+  try {
+    const authHeaders = await getFirebaseAuthHeaders();
+    const res = await fetch(`${getBackendBaseUrl()}/api/universal-search/admin/stats`, {
+      headers: authHeaders,
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+export async function updateUniversalSearchConfigApi(
+  config: Partial<UniversalSearchAdminConfig>
+): Promise<{ success: boolean; config?: UniversalSearchAdminConfig }> {
+  try {
+    const authHeaders = await getFirebaseAuthHeaders();
+    const res = await fetch(`${getBackendBaseUrl()}/api/universal-search/admin/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify(config),
+    });
+    if (!res.ok) return { success: false };
+    return await res.json();
+  } catch {
+    return { success: false };
+  }
+}
+
+export async function clearUniversalSearchLogsApi(): Promise<boolean> {
+  try {
+    const authHeaders = await getFirebaseAuthHeaders();
+    const res = await fetch(`${getBackendBaseUrl()}/api/universal-search/admin/clear-logs`, {
+      method: "POST",
+      headers: authHeaders,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export function getUniversalSearchDownloadUrl(rawUrl: string, fileName?: string): string {
+  const safeName = (fileName || "sajjat-ai-media").replace(/[^a-zA-Z0-9._-]/g, "_");
+  return `${getBackendBaseUrl()}/api/universal-search/download?url=${encodeURIComponent(
+    rawUrl
+  )}&name=${encodeURIComponent(safeName)}`;
+}
+
 
 
